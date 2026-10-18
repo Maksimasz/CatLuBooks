@@ -4,7 +4,8 @@ import unittest
 from unittest.mock import patch
 
 from config import LLMConfig, resolve_llm
-from core.providers import base_url_for, key_for, needs_key, provider_catalog
+from core.llm import _is_chat_model, _is_free_pricing
+from core.providers import base_url_for, key_for, model_is_free, needs_key, provider_catalog
 
 
 class ProviderTests(unittest.TestCase):
@@ -45,6 +46,35 @@ class ProviderTests(unittest.TestCase):
         self.assertIn("ollama", catalog)
         self.assertTrue(catalog["ollama"]["configured"])
         self.assertTrue(catalog["ollama"]["models"])
+
+
+class FreeModelTests(unittest.TestCase):
+    def test_free_by_zero_pricing(self):
+        self.assertTrue(_is_free_pricing({"prompt": "0", "completion": "0"}))
+        self.assertFalse(_is_free_pricing({"prompt": "0.000001", "completion": "0"}))
+        self.assertIsNone(_is_free_pricing(None))
+        self.assertIsNone(_is_free_pricing({"prompt": "0"}))
+
+    def test_free_all_beats_pricing(self):
+        # У Groq весь API бесплатный, поэтому цены из ответа не показательны.
+        self.assertTrue(model_is_free("groq", "openai/gpt-oss-120b", False))
+
+    def test_free_suffix_and_flash_hint(self):
+        self.assertTrue(model_is_free("openrouter", "meta-llama/llama-3.3-70b:free"))
+        self.assertFalse(model_is_free("openrouter", "openai/gpt-4o", False))
+        self.assertTrue(model_is_free("gemini", "gemini-2.5-flash"))
+        self.assertFalse(model_is_free("gemini", "gemini-2.5-pro"))
+
+    def test_chat_model_filters_speech_and_embeddings(self):
+        self.assertFalse(_is_chat_model({"id": "whisper-large-v3",
+                                         "output_modalities": ["transcription"]}))
+        self.assertFalse(_is_chat_model({"id": "google/lyria",
+                                         "output_modalities": ["text", "audio"]}))
+        self.assertFalse(_is_chat_model({"id": "nomic-embed-text:latest"}))
+        self.assertFalse(_is_chat_model({"id": "guard", "context_length": 512}))
+        self.assertTrue(_is_chat_model({"id": "openai/gpt-oss-120b", "context_length": 131072,
+                                        "output_modalities": ["text"]}))
+        self.assertTrue(_is_chat_model({"id": "yandex/llm:latest"}))
 
 
 if __name__ == "__main__":

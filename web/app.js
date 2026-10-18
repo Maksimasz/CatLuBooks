@@ -12,9 +12,17 @@ const modelListEl = document.getElementById("model-list");
 const keyBtn = document.getElementById("keybtn");
 
 const history = [];
-let providers = {};
+let providers = {};        // имя -> запись из /api/providers
+let allModels = {};        // имя -> {models:[{id,free}], source, error, configured, label}
+let defaultProvider = "ollama";
+let defaultModel = "";
+
 const LS_PROVIDER = "catlu.provider";
-const LS_MODEL = "catlu.model";
+const MAX_OWN_PAID = 60;   // сколько платных моделей своего провайдера показывать
+const MAX_OTHER = 40;      // сколько бесплатных чужих моделей показывать на провайдера
+
+const savedModel = (provider) => localStorage.getItem(`catlu.model.${provider}`) || "";
+const saveModel = (provider, model) => localStorage.setItem(`catlu.model.${provider}`, model || "");
 
 function el(tag, cls, text) {
   const node = document.createElement(tag);
@@ -23,29 +31,83 @@ function el(tag, cls, text) {
   return node;
 }
 
-function currentProvider() { return providerEl.value; }
-function currentModel() { return modelEl.value.trim(); }
+const currentProvider = () => providerEl.value;
+const currentModel = () => modelEl.value.trim();
+const setStatus = (text) => { statusEl.textContent = text || ""; };
 
-function setStatus(text) { statusEl.textContent = text || ""; }
+/** Разбирает выбор вида «[groq] llama-3.1-8b-instant». */
+function choice(value) {
+  const match = value.match(/^\[([^\]]+)\]\s+(.+)$/);
+  return match ? { provider: match[1], model: match[2] } : null;
+}
 
 function updateStatus() {
-  const p = providers[currentProvider()];
-  if (!p) { setStatus(""); return; }
-  if (p.needs_key && !p.configured) {
-    setStatus(`нужен ключ для «${p.name}» 🔑`);
+  const info = providers[currentProvider()];
+  if (!info) { setStatus(""); return; }
+  const models = allModels[currentProvider()]?.models || [];
+  const free = models.filter((m) => m.free).length;
+  if (info.needs_key && !info.configured) {
+    setStatus(`нужен ключ для «${info.label}» — нажмите 🔑, чтобы увидеть модели`);
+  } else if (!currentModel()) {
+    setStatus("выберите модель из списка");
+  } else if (free) {
+    setStatus(`бесплатных моделей: ${free}`);
   } else {
     setStatus("");
   }
 }
 
-function fillModels(providerName, preferred) {
-  const p = providers[providerName];
+/** Наполняет список моделей для провайдера + бесплатные модели других. */
+function renderOptions(provider) {
   modelListEl.innerHTML = "";
-  (p?.models || []).forEach((m) => modelListEl.appendChild(el("option", null, m)));
-  const saved = preferred ?? localStorage.getItem(LS_MODEL);
-  modelEl.value = (saved && (!p?.models?.length || p.models.includes(saved)))
-    ? saved
-    : (p?.models?.[0] || saved || "");
+
+  const own = allModels[provider]?.models || [];
+  const free = own.filter((m) => m.free);
+  const paid = own.filter((m) => !m.free).slice(0, MAX_OWN_PAID);
+  free.concat(paid).forEach((m) => {
+    const opt = el("option", null, m.free ? `${m.id} — бесплатно` : m.id);
+    opt.value = m.id;
+    opt.label = opt.textContent;
+    modelListEl.appendChild(opt);
+  });
+
+  Object.keys(allModels).forEach((name) => {
+    if (name === provider) return;
+    const info = allModels[name];
+    (info.models || []).filter((m) => m.free).slice(0, MAX_OTHER).forEach((m) => {
+      const value = `[${name}] ${m.id}`;
+      const opt = el("option", null, `${m.id} — бесплатно (${info.label || name})`);
+      opt.value = value;
+      opt.label = opt.textContent;
+      modelListEl.appendChild(opt);
+    });
+  });
+}
+
+function selectModel(provider) {
+  const info = allModels[provider] || {};
+  const models = info.models || [];
+  const ids = models.map((m) => m.id);
+  const candidates = [
+    savedModel(provider),
+    provider === defaultProvider ? defaultModel : "",
+    info.preferred || "",
+  ];
+  for (const candidate of candidates) {
+    if (candidate && ids.includes(candidate)) {
+      modelEl.value = candidate;
+      saveModel(provider, candidate);
+      return;
+    }
+  }
+  const first = models.find((m) => m.free) || models[0];
+  modelEl.value = first ? first.id : (candidates[0] || "");
+  saveModel(provider, currentModel());
+}
+
+function fillModels(provider) {
+  renderOptions(provider);
+  selectModel(provider);
 }
 
 async function loadProviders() {
@@ -57,6 +119,8 @@ async function loadProviders() {
   }
   providers = {};
   data.providers.forEach((p) => { providers[p.name] = p; });
+  defaultProvider = data.default?.provider || "ollama";
+  defaultModel = data.default?.model || "";
 
   providerEl.innerHTML = "";
   data.providers.forEach((p) => {
@@ -65,27 +129,64 @@ async function loadProviders() {
     providerEl.appendChild(opt);
   });
 
-  const savedProvider = localStorage.getItem(LS_PROVIDER);
-  providerEl.value = providers[savedProvider] ? savedProvider : (data.default?.provider || "ollama");
-  const preferredModel = providerEl.value === (data.default?.provider) ? data.default?.model : null;
-  fillModels(providerEl.value, preferredModel);
-  localStorage.setItem(LS_MODEL, currentModel());
+  // Сразу показываем запасной список из реестра, затем уточняем его
+  // актуальными данными провайдеров (это может занять пару секунд).
+  allModels = {};
+  data.providers.forEach((p) => {
+    allModels[p.name] = {
+      provider: p.name,
+      label: p.label,
+      preferred: "",
+      source: "fallback",
+      configured: p.configured,
+      models: (p.models || []).map((id) => ({ id, free: id.endsWith(":free") })),
+    };
+  });
+
+  const saved = localStorage.getItem(LS_PROVIDER);
+  providerEl.value = providers[saved] ? saved : defaultProvider;
+  fillModels(providerEl.value);
+  updateStatus();
+  await refreshModels();
+}
+
+/** Запрашивает списки моделей у всех провайдеров и перерисовывает поле. */
+async function refreshModels() {
+  try {
+    const data = await (await fetch("/api/models?all=1")).json();
+    allModels = {};
+    (data.providers || []).forEach((p) => { allModels[p.provider] = p; });
+  } catch {
+    allModels = {};
+  }
+  fillModels(currentProvider());
   updateStatus();
 }
 
 providerEl.addEventListener("change", () => {
   localStorage.setItem(LS_PROVIDER, currentProvider());
   fillModels(currentProvider());
-  localStorage.setItem(LS_MODEL, currentModel());
   updateStatus();
 });
 
-modelEl.addEventListener("change", () => localStorage.setItem(LS_MODEL, currentModel()));
+modelEl.addEventListener("change", applyChoice);
+
+/** Если выбран пункт вида «[openrouter] ... :free», переключаем и провайдера. */
+function applyChoice() {
+  const pick = choice(modelEl.value);
+  if (pick && providers[pick.provider]) {
+    providerEl.value = pick.provider;
+    localStorage.setItem(LS_PROVIDER, pick.provider);
+    modelEl.value = pick.model;
+    renderOptions(pick.provider);
+  }
+  saveModel(currentProvider(), currentModel());
+  updateStatus();
+}
 
 keyBtn.addEventListener("click", async () => {
   const name = currentProvider();
-  const p = providers[name];
-  const label = p ? p.label : name;
+  const label = providers[name]?.label || name;
   const key = window.prompt(`API-ключ для «${label}»:\n(хранится только на этом компьютере)`);
   if (key == null) return;
   try {
@@ -95,10 +196,9 @@ keyBtn.addEventListener("click", async () => {
       body: JSON.stringify({ provider: name, key }),
     });
     if (!r.ok) throw new Error(await r.text());
-    setStatus(key.trim() ? "ключ сохранён" : "ключ удалён");
+    setStatus(key.trim() ? "ключ сохранён, обновляю список…" : "ключ удалён");
     await loadProviders();
-    setTimeout(() => updateStatus(), 1500);
-  } catch (err) {
+  } catch {
     setStatus("не удалось сохранить ключ");
   }
 });
@@ -216,6 +316,7 @@ formEl.addEventListener("submit", async (event) => {
   event.preventDefault();
   const text = inputEl.value.trim();
   if (!text) return;
+  applyChoice();
   inputEl.value = "";
   inputEl.style.height = "auto";
   sendEl.disabled = true;

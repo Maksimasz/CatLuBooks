@@ -37,10 +37,11 @@ PROVIDERS: Dict[str, Dict[str, Any]] = {
         "base_url": "https://api.groq.com/openai/v1",
         "env": "GROQ_API_KEY",
         "models": [
-            "llama-3.3-70b-versatile",
-            "llama-3.1-8b-instant",
         ],
         "needs_key": True,
+        "free_all": True,
+        # Модель, которую предлагаем по умолчанию.
+        "preferred": "openai/gpt-oss-120b",
     },
     "gemini": {
         "label": "Google Gemini (бесплатный тариф)",
@@ -51,6 +52,9 @@ PROVIDERS: Dict[str, Dict[str, Any]] = {
             "gemini-2.0-flash",
         ],
         "needs_key": True,
+        # Модели flash входят в бесплатный тариф.
+        "free_models": ["flash"],
+        "preferred": "gemini-2.5-flash",
     },
     "openrouter": {
         "label": "OpenRouter (есть бесплатные модели)",
@@ -62,6 +66,8 @@ PROVIDERS: Dict[str, Dict[str, Any]] = {
             "google/gemini-2.0-flash-exp:free",
         ],
         "needs_key": True,
+        # Список моделей и цены OpenRouter отдаёт без ключа, поэтому список
+        # подтягивается вживую, а бесплатные определяются по цене.
     },
     "deepseek": {
         "label": "DeepSeek (дешёвый API)",
@@ -145,6 +151,26 @@ def base_url_for(provider: str) -> str:
 
 def needs_key(provider: str) -> bool:
     return bool(PROVIDERS.get(provider, {}).get("needs_key", True))
+
+
+def model_is_free(provider: str, ident: str, pricing_free: bool | None = None) -> bool:
+    """Бесплатна ли модель.
+
+    pricing_free — сведения о цене от провайдера (OpenRouter), если есть.
+    Если цен нет, смотрим суффикс ":free", флаг free_all и подсказки free_models.
+    """
+    info = PROVIDERS.get(provider, {})
+    if info.get("free_all"):
+        # Например, у Groq весь API бесплатный (с ограничением по частоте),
+        # поэтому цены из ответа не показательны.
+        return True
+    if pricing_free is not None:
+        return bool(pricing_free)
+    if ident.endswith(":free"):
+        return True
+    needles = info.get("free_models") or ()
+    low = ident.lower()
+    return any(str(needle).lower() in low for needle in needles)
 
 
 def provider_catalog() -> List[Dict[str, Any]]:

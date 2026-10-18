@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -21,8 +22,15 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from config import Config, load_config, resolve_llm
-from core.llm import LLMError, OpenAICompatClient
-from core.providers import key_for, needs_key, provider_catalog, save_secret
+from core.llm import LLMError, OpenAICompatClient, fetch_models
+from core.providers import (
+    PROVIDERS,
+    key_for,
+    model_is_free,
+    needs_key,
+    provider_catalog,
+    save_secret,
+)
 from core.store import VectorStore
 
 for _stream in (sys.stdout, sys.stderr):
@@ -196,7 +204,73 @@ async def set_key(req: KeyRequest):
     if req.provider not in {item["name"] for item in provider_catalog()}:
         raise HTTPException(status_code=400, detail="Неизвестный провайдер")
     save_secret(req.provider, req.key.strip())
+    _models_cache.pop(req.provider, None)  # ключ изменился — список моделей обновим
     return {"ok": True, "configured": bool(key_for(req.provider))}
+
+
+MODELS_TTL = 300.0  # секунд; список моделей меняется нечасто
+_models_cache: dict[str, tuple[float, dict]] = {}
+
+
+async def provider_models(name: str, fresh: bool = False) -> dict:
+    """Модели провайдера: живой список от сервиса, иначе статический.
+
+    Бесплатные модели помечаются и идут первыми. Без ключа большинство
+    облачных сервисов список не отдаёт — тогда берём запасной из реестра.
+    """
+    if not fresh:
+        cached = _models_cache.get(name)
+        if cached and time.monotonic() - cached[0] < MODELS_TTL:
+            return cached[1]
+
+    info = PROVIDERS.get(name, {})
+    live: list = []
+    error = None
+    if name in PROVIDERS:
+        try:
+            live = await fetch_models(resolve_llm(CONFIG.llm, name, None))
+        except Exception as exc:  # нет ключа, нет сети и т.п.
+            error = str(exc)
+
+    source = "provider" if live else "fallback"
+    models = []
+    for item in (live or info.get("models", [])):
+        if isinstance(item, dict):
+            if item.get("chat") is False:
+                continue  # речь, расшифровка звука, картинки — не для чата
+            ident, pricing_free = item.get("id"), item.get("free")
+        else:
+            ident, pricing_free = item, None
+        if not ident:
+            continue
+        ident = str(ident)
+        models.append({"id": ident, "free": model_is_free(name, ident, pricing_free)})
+    models.sort(key=lambda m: (not m["free"], m["id"].lower()))
+
+    result = {
+        "provider": name,
+        "label": info.get("label", name),
+        "models": models,
+        "preferred": info.get("preferred", ""),
+        "source": source,
+        "configured": not info.get("needs_key", True) or bool(key_for(name)),
+        "error": error,
+    }
+    _models_cache[name] = (time.monotonic(), result)
+    return result
+
+
+@app.get("/api/models")
+async def models(provider: str | None = None, all: int = 0):
+    """Список моделей: ?provider=groq для одного, ?all=1 — сразу для всех."""
+    if all:
+        results = await asyncio.gather(*(provider_models(name) for name in PROVIDERS))
+        return {"providers": list(results)}
+    name = provider or CONFIG.llm.provider
+    if name not in PROVIDERS:
+        return {"provider": name, "label": name, "models": [], "source": "fallback",
+                "configured": True, "error": "нет реестра моделей"}
+    return await provider_models(name)
 
 
 # Статика (index.html, app.js, PWA) — монтируется последней, чтобы

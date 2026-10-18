@@ -10,7 +10,7 @@
 from __future__ import annotations
 
 import json
-from typing import AsyncIterator, Dict, List
+from typing import Any, AsyncIterator, Dict, List
 
 import httpx
 
@@ -110,3 +110,78 @@ class OpenAICompatClient:
 
     async def aclose(self) -> None:
         await self._client.aclose()
+
+
+async def fetch_models(cfg: LLMConfig) -> List[Dict[str, Any]]:
+    """Спрашивает у провайдера список доступных моделей (/models).
+
+    Список моделей у облачных провайдеров меняется, поэтому его нельзя
+    жёстко прописывать — берём актуальный у самого сервиса. Для моделей,
+    у которых провайдер отдаёт цены (например OpenRouter), отмечаем бесплатные.
+    """
+    headers = {}
+    if cfg.api_key:
+        headers["Authorization"] = f"Bearer {cfg.api_key}"
+    base_url = cfg.base_url.rstrip("/") + "/"
+    try:
+        async with httpx.AsyncClient(
+            base_url=base_url, headers=headers, timeout=httpx.Timeout(15.0, connect=8.0)
+        ) as client:
+            response = await client.get("models")
+            response.raise_for_status()
+            data = response.json()
+    except httpx.HTTPError as exc:
+        raise LLMError(f"Не удалось получить список моделей: {exc}") from exc
+    except ValueError as exc:
+        raise LLMError("Провайдер вернул список моделей в неизвестном формате") from exc
+
+    items = data.get("data") if isinstance(data, dict) else data
+    models: List[Dict[str, Any]] = []
+    for item in items or []:
+        if not isinstance(item, dict):
+            if item:
+                models.append({"id": str(item), "free": None, "chat": True})
+            continue
+        ident = item.get("id")
+        if not ident:
+            continue
+        models.append({
+            "id": str(ident),
+            "free": _is_free_pricing(item.get("pricing")),
+            "chat": _is_chat_model(item),
+        })
+    return models
+
+
+def _is_chat_model(item: Dict[str, Any]) -> bool:
+    """Годится ли модель для чата (не картинки/речь/расшифровка звука)."""
+    arch = item.get("architecture")
+    arch = arch if isinstance(arch, dict) else {}
+    ident = str(item.get("id", "")).lower()
+    if "embed" in ident:
+        return False  # модель эмбеддингов, для ответов не подходит
+    outputs = item.get("output_modalities") or arch.get("output_modalities")
+    if isinstance(outputs, list) and outputs:
+        if "text" not in outputs:
+            return False
+        if any(kind in ("audio", "image", "video") for kind in outputs):
+            return False
+    for key in ("context_length", "context_window", "context"):
+        value = item.get(key)
+        if isinstance(value, (int, float)):
+            return value >= 1024  # совсем короткий контекст для RAG бесполезен
+    return True
+
+
+def _is_free_pricing(pricing) -> bool | None:
+    """Бесплатна ли модель по данным о ценах (None — неизвестно)."""
+    if not isinstance(pricing, dict):
+        return None
+    prompt = pricing.get("prompt")
+    completion = pricing.get("completion")
+    if prompt is None or completion is None:
+        return None
+    try:
+        return float(prompt) == 0 and float(completion) == 0
+    except (TypeError, ValueError):
+        return None
