@@ -1,16 +1,21 @@
 :root {
-  --bg: #0f172a;
-  --panel: #1e293b;
-  --panel-2: #273449;
-  --text: #e2e8f0;
-  --muted: #94a3b8;
+  --bg: #000;
+  --text: #f2f2f2;
+  --muted: #9c9c9c;
+  --dim: #6b6b6b;
   --accent: #f59e0b;
   --accent-2: #d97706;
-  --user: #2563eb;
+  --user: #1c1c1c;      /* вопрос пользователя — тёмная плашка */
+  --field: #121212;     /* поле ввода */
+  --line: #1b1b1b;      /* едва заметные линии таблиц и разделов */
   --radius: 14px;
 }
 
 * { box-sizing: border-box; }
+
+/* Полосы прокрутки не показываем: содержимое всё равно листается. */
+* { scrollbar-width: none; }
+*::-webkit-scrollbar { width: 0; height: 0; }
 
 html, body {
   margin: 0;
@@ -35,7 +40,6 @@ body {
   justify-content: space-between;
   gap: 12px;
   padding: 14px 4px;
-  border-bottom: 1px solid #ffffff12;
   position: sticky;
   top: 0;
   background: var(--bg);
@@ -51,26 +55,26 @@ body {
 
 .controls { display: flex; align-items: center; gap: 6px; flex: 1; justify-content: flex-end; }
 .controls select, .controls input {
-  background: var(--panel);
+  background: var(--field);
   color: var(--text);
-  border: 1px solid #ffffff1f;
+  border: 1px solid transparent;
   border-radius: 8px;
   padding: 6px 8px;
   font: 13px/1.2 inherit;
   max-width: 46vw;
 }
-.controls select:focus, .controls input:focus { border-color: var(--accent-2); outline: none; }
+.controls select:focus, .controls input:focus { border-color: #333; outline: none; }
 #model { width: 150px; }
 #keybtn {
-  background: var(--panel);
-  border: 1px solid #ffffff1f;
+  background: var(--field);
+  border: 1px solid transparent;
   color: var(--text);
   border-radius: 8px;
   padding: 6px 9px;
   font-size: 14px;
   cursor: pointer;
 }
-#keybtn:hover { border-color: var(--accent-2); }
+#keybtn:hover { border-color: #333; }
 
 .subbar {
   display: flex;
@@ -107,18 +111,19 @@ body {
 .msg.user .col { align-items: flex-end; max-width: 82%; }
 
 .bubble {
-  padding: 11px 14px;
+  padding: 0;
   border-radius: var(--radius);
   overflow-wrap: anywhere;
 }
 .msg.user .bubble {
   background: var(--user);
+  padding: 10px 14px;
   border-bottom-right-radius: 4px;
   white-space: pre-wrap;
 }
 .msg.assistant .bubble {
-  background: var(--panel);
-  border-bottom-left-radius: 4px;
+  background: none;
+  padding: 0;
   width: 100%;
 }
 
@@ -129,19 +134,19 @@ body {
 .bubble h3, .bubble h4, .bubble h5, .bubble h6 { margin: 16px 0 8px; line-height: 1.3; }
 .bubble h3 { font-size: 17px; }
 .bubble h4 { font-size: 16px; }
-.bubble h5, .bubble h6 { font-size: 15px; color: #cbd5e1; }
+.bubble h5, .bubble h6 { font-size: 15px; color: #d8d8d8; }
 .bubble ul, .bubble ol { margin: 0 0 10px; padding-left: 22px; }
 .bubble li { margin: 3px 0; }
 .bubble li.nested { margin-left: 18px; list-style: circle; }
 .bubble strong { color: #fff; }
 .bubble code {
-  background: #0b1220;
+  background: #151515;
   padding: 1px 5px;
   border-radius: 5px;
   font-size: 13px;
 }
 .bubble pre {
-  background: #0b1220;
+  background: #101010;
   padding: 10px 12px;
   margin: 0 0 10px;
   border-radius: 10px;
@@ -151,21 +156,28 @@ body {
 .bubble blockquote {
   margin: 0 0 10px;
   padding: 2px 0 2px 10px;
-  border-left: 3px solid var(--accent-2);
-  color: #cbd5e1;
+  border-left: 2px solid var(--line);
+  color: #cfcfcf;
 }
 .bubble a { color: var(--accent); }
-.bubble hr { border: none; border-top: 1px solid #ffffff1f; margin: 14px 0; }
+.bubble hr { border: none; border-top: 1px solid var(--line); margin: 14px 0; }
 
-.table-wrap { overflow-x: auto; margin: 0 0 10px; }
+.table-wrap { overflow-x: auto; margin: 0 0 12px; }
 .table-wrap table { border-collapse: collapse; width: 100%; font-size: 14px; }
 .table-wrap th, .table-wrap td {
-  border: 1px solid #ffffff1f;
-  padding: 6px 9px;
+  border: none;
+  border-bottom: 1px solid var(--line);
+  padding: 8px 10px;
   text-align: left;
   vertical-align: top;
 }
-.table-wrap th { background: #ffffff12; }
+.table-wrap th {
+  color: #fff;
+  font-weight: 600;
+  border-bottom-color: #2c2c2c;
+  padding-top: 0;
+}
+.table-wrap tr:last-child td { border-bottom: none; }
 
 .cursor {
   display: inline-block;
@@ -181,9 +193,8 @@ body {
 /* Источники — внизу ответа, номера как в ссылках «Источник N» */
 .sources {
   width: 100%;
-  padding: 9px 12px 7px;
-  background: var(--panel-2);
-  border-radius: 10px;
+  padding: 8px 0 0;
+  border-top: 1px solid var(--line);
   font-size: 13px;
 }
 .sources-head {
@@ -193,12 +204,12 @@ body {
   user-select: none;
 }
 .sources-head::-webkit-details-marker { display: none; }
-.sources-head::before { content: "▾ "; color: var(--accent-2); }
+.sources-head::before { content: "▾ "; color: var(--dim); }
 .sources:not([open]) .sources-head::before { content: "▸ "; }
 .source-list { margin-top: 6px; }
 .source { display: flex; align-items: baseline; gap: 8px; padding: 2px 0; }
 .src-index {
-  color: var(--muted);
+  color: var(--dim);
   min-width: 3ch;
   text-align: right;
   font-variant-numeric: tabular-nums;
@@ -209,9 +220,9 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: #cbd5e1;
+  color: #bdbdbd;
 }
-.src-page { color: var(--accent); white-space: nowrap; }
+.src-page { color: var(--text); white-space: nowrap; }
 
 .hint {
   color: var(--muted);
@@ -236,13 +247,13 @@ body {
   max-height: 160px;
   padding: 12px 14px;
   border-radius: var(--radius);
-  border: 1px solid #ffffff1f;
-  background: var(--panel);
+  border: 1px solid transparent;
+  background: var(--field);
   color: var(--text);
   font: inherit;
   outline: none;
 }
-#input:focus { border-color: var(--accent-2); }
+#input:focus { border-color: #333; }
 
 #send {
   width: 48px; height: 48px;
