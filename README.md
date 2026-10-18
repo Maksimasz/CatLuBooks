@@ -38,6 +38,8 @@ CatLuBooks/
 │   ├── database.py     # индексация книг и поиск
 │   ├── parsers.py      # чтение PDF, EPUB, TXT, FB2 (+ OCR сканов)
 │   ├── llm.py          # клиент генеративной модели
+│   ├── providers.py    # реестр провайдеров и API-ключи
+│   ├── models.py       # список моделей для интерфейса
 │   └── store.py        # обёртка хранилища для веб-слоя
 ├── web/                # интерфейс чата + PWA (манифест, service worker)
 ├── tests/              # автономные тесты (без Ollama и моделей)
@@ -61,10 +63,11 @@ pip install -r requirements.txt
 EPUB, TXT/MD и FB2 — список задаётся в `store.formats`. Затем:
 
 ```bash
-python -c "from config import load_config; from core.store import VectorStore; VectorStore(load_config()).index()"
+python -m core.database
 ```
 
-Повторный импорт файла с тем же именем обновляет его фрагменты.
+Повторный запуск обновляет фрагменты файлов, которые уже были в базе, — книги
+не дублируются.
 
 Страницы PDF читаются текстовым слоем, а если включить `store.ocr: auto` и в
 системе есть [tesseract](https://github.com/UB-Mannheim/tesseract/wiki) — то
@@ -203,7 +206,7 @@ python app.py
 ## Тесты
 
 ```bash
-python -m unittest tests.test_database tests.test_parsers tests.test_search tests.test_providers
+python -m unittest tests.test_database tests.test_parsers tests.test_search tests.test_providers tests.test_models
 ```
 
 Тесты автономные: не требуют Ollama, моделей и рабочей базы.

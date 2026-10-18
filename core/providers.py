@@ -92,8 +92,6 @@ PROVIDERS: Dict[str, Dict[str, Any]] = {
     },
 }
 
-DEFAULT_PROVIDER = "ollama"
-
 
 def load_secrets() -> Dict[str, str]:
     """Читает сохранённые ключи (secrets.json). Файл в .gitignore."""

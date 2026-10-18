@@ -1,21 +1,16 @@
-# Зависимости для RAG YandexGPT ассистента через Ollama
+# Зависимости RAG-ассистента CatLuBooks.
+# Ставятся так: pip install -r requirements.txt
 
-# Основные зависимости
-ollama>=0.3.0
-
-# RAG и векторная база данных
+# База и эмбеддинги (считаются локально)
 chromadb>=0.4.0
 sentence-transformers>=2.2.0
+numpy>=1.24.0
 
-# Чтение книг: PDF (текстовый слой + OCR через tesseract), EPUB, TXT, FB2
+# Чтение книг: PDF (текстовый слой + OCR сканов через tesseract), EPUB, TXT, FB2
 pymupdf>=1.24.0
 
-# Веб-оболочка (FastAPI + статический чат/PWA)
+# Веб-оболочка (FastAPI + чат/PWA)
 fastapi>=0.110
 uvicorn>=0.27
 httpx>=0.27
 PyYAML>=6.0
-
-# Дополнительные библиотеки
-numpy>=1.24.0
-tqdm>=4.65.0 

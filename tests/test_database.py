@@ -178,6 +178,24 @@ class StreamingImportTests(unittest.TestCase):
         ])
 
 
+class InitTests(unittest.TestCase):
+    """Открытие базы: существующая коллекция переиспользуется, не пересоздаётся."""
+
+    def test_collection_is_opened_or_created_with_description(self):
+        client = Mock()
+        collection = client.get_or_create_collection.return_value
+        with patch.object(module.chromadb, "PersistentClient",
+                          return_value=client, create=True):
+            with contextlib.redirect_stdout(io.StringIO()):
+                db = module.RAGDatabase(db_path=":memory:", collection_name="книги",
+                                        embedding_model="test", ocr="off")
+
+        self.assertIs(db.collection, collection)
+        self.assertIsNone(db.tesseract)  # ocr: off — распознавание не поднимаем
+        client.get_or_create_collection.assert_called_once_with(
+            name="книги", metadata=module.COLLECTION_META)
+
+
 class FolderTests(unittest.TestCase):
     def setUp(self):
         self.db = module.RAGDatabase.__new__(module.RAGDatabase)

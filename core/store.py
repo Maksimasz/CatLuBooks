@@ -87,7 +87,3 @@ class VectorStore:
 
     def stats(self) -> Dict[str, Any]:
         return self._db.get_database_stats()
-
-    def index(self, folder: str | None = None) -> bool:
-        """Пересобирает базу из книг в папке (PDF, EPUB, TXT, FB2)."""
-        return self._db.process_research_folder(folder or self.cfg.store.research_folder)

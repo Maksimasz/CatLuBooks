@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Модуль для создания и управления векторной базой данных для RAG системы
-Обрабатывает PDF файлы исследований и создает векторные представления
+Векторная база книг: индексация (PDF, EPUB, TXT, FB2) и гибридный поиск по ней.
 """
 
 import os
 import sys
-import logging
 from typing import List, Dict, Any, Optional
 from pathlib import Path
 import re
@@ -17,20 +15,20 @@ from sentence_transformers import SentenceTransformer
 
 from core import parsers
 
-# Настройка логирования
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# На консоли Windows (cp866/cp1251) печать эмодзи падает с UnicodeEncodeError
+# и прерывает работу. Заменяем непечатаемые символы вместо ошибки.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(errors="replace")
+
+# Описание коллекции: видно в базе, помогает понять, что за данные внутри.
+COLLECTION_META = {"description": "Векторная база исследований для RAG"}
 
 # Надбавка фрагменту, в котором совпали все слова вопроса. Больше любой суммы
 # мест RRF (места дают в лучшем случае 1/60 + 0,6/60), поэтому полное
 # совпадение слов всегда идёт впереди — см. search_similar.
 EXACT_MATCH_BONUS = 10.0
 
-# На консоли Windows (cp866/cp1251) печать эмодзи падает с UnicodeEncodeError
-# и прерывает работу. Заменяем непечатаемые символы вместо ошибки.
-for _stream in (sys.stdout, sys.stderr):
-    if hasattr(_stream, "reconfigure"):
-        _stream.reconfigure(errors="replace")
 
 def _set_alarm(seconds: int):
     """Ограничение времени на обработку файла (на Windows не поддерживается)."""
@@ -63,7 +61,7 @@ class RAGDatabase:
         "какие", "есть", "найди", "можно", "нужно", "надо", "хочу", "сделать",
     })
 
-    def __init__(self, 
+    def __init__(self,
                  db_path: str = "./chroma_db",
                  collection_name: str = "research_papers",
                  embedding_model: str = "paraphrase-multilingual-MiniLM-L12-v2",
@@ -71,17 +69,16 @@ class RAGDatabase:
                  chunk_overlap: int = 200,
                  formats: Optional[List[str]] = None,
                  ocr: str = "auto"):
-        """
-        Инициализация RAG базы данных
-        
+        """Открывает базу и загружает модель эмбеддингов.
+
         Args:
-            db_path: Путь к базе данных ChromaDB
-            collection_name: Название коллекции
-            embedding_model: Модель для создания эмбеддингов
-            chunk_size: Размер фрагмента в символах
-            chunk_overlap: Перекрытие между фрагментами в символах
-            formats: Расширения файлов, которые индексируются
-            ocr: "auto" — распознавать страницы без текста (нужен tesseract),
+            db_path: путь к папке ChromaDB
+            collection_name: имя коллекции внутри базы
+            embedding_model: локальная модель эмбеддингов
+            chunk_size: размер фрагмента в символах
+            chunk_overlap: перекрытие соседних фрагментов
+            formats: расширения файлов, которые читаем из папки с книгами
+            ocr: "auto" — распознавать страницы-картинки (нужен tesseract),
                  "off" — не распознавать
         """
         self.db_path = db_path
@@ -93,26 +90,21 @@ class RAGDatabase:
         self.tesseract = None if ocr == "off" else parsers.Tesseract()
         if self.tesseract is not None and not self.tesseract.available:
             self.tesseract = None
-        
-        # Инициализация ChromaDB
+
         self.client = chromadb.PersistentClient(path=db_path)
-        
-        # Инициализация модели эмбеддингов
+
         print(f"🔄 Загружаю модель эмбеддингов: {embedding_model}")
         self.embedding_model = SentenceTransformer(embedding_model)
         print("✅ Модель эмбеддингов загружена")
-        
-        # Создание или получение коллекции
-        try:
-            self.collection = self.client.get_collection(collection_name)
-            print(f"✅ Найдена существующая коллекция: {collection_name}")
-        except:
-            self.collection = self.client.create_collection(
-                name=collection_name,
-                metadata={"description": "Векторная база исследований для RAG"}
-            )
-            print(f"✅ Создана новая коллекция: {collection_name}")
-    
+
+        # Коллекция открывается или создаётся — отдельный случай «уже есть»
+        # не нужен: get_or_create сам вернёт существующую.
+        self.collection = self.client.get_or_create_collection(
+            name=collection_name, metadata=COLLECTION_META,
+        )
+        print(f"✅ Коллекция «{collection_name}» готова: "
+              f"{self.collection.count()} фрагментов")
+
     def iter_sections(self, file_path: str):
         """Текст документа по частям: страница PDF, глава EPUB, часть TXT.
 
@@ -121,14 +113,6 @@ class RAGDatabase:
         """
         yield from parsers.read_sections(file_path, self.tesseract)
 
-    def extract_text(self, file_path: str) -> str:
-        """Весь текст файла одной строкой (для внешних вызовов)."""
-        return "\n".join(text for _, text in self.iter_sections(file_path))
-
-    def clean_text(self, text: str) -> str:
-        """Очищает и нормализует текст (колонтитулы, переносы, мусор)."""
-        return parsers.clean_text(text)
-    
     def iter_text_chunks(self, text: str, chunk_size: int = 1000, overlap: int = 200):
         """Выдаёт фрагменты без накопления списка и всегда движется вперёд."""
         if chunk_size <= 0 or not 0 <= overlap < chunk_size:
@@ -182,7 +166,7 @@ class RAGDatabase:
             metadatas.clear()
 
         for number, section in self.iter_sections(str(path)):
-            text = self.clean_text(section)
+            text = parsers.clean_text(section)
             if not parsers.keep_section(text):
                 continue  # пустая страница, обложка, оглавление или указатель
             for chunk in self.iter_text_chunks(text, self.chunk_size, self.chunk_overlap):
@@ -237,10 +221,14 @@ class RAGDatabase:
             print(f"❌ Папка {research_folder} не найдена")
             return False
 
-        files = [path for path in sorted(research_path.rglob("*"))
-                 if path.is_file() and path.suffix.lower() in self.formats]
-        skipped = [path for path in sorted(research_path.rglob("*"))
-                   if path.is_file() and path.suffix.lower() not in self.formats]
+        files, skipped = [], []
+        for path in sorted(research_path.rglob("*")):
+            if not path.is_file():
+                continue
+            if path.suffix.lower() in self.formats:
+                files.append(path)
+            else:
+                skipped.append(path)
         if not files:
             print(f"❌ Книги не найдены в {research_folder} "
                   f"(поддерживаются: {', '.join(self.formats)})")
@@ -263,34 +251,34 @@ class RAGDatabase:
 
             try:
                 _set_alarm(300)  # ограничение времени на файл, только для UNIX
-                self.add_file_to_database(str(file_path))
-                _set_alarm(0)
+                try:
+                    self.add_file_to_database(str(file_path))
+                finally:
+                    _set_alarm(0)
                 successful_files += 1
 
             except TimeoutError:
                 print(f"⏰ Превышен лимит времени для {file_path.name}")
                 failed_files.append((file_path.name, "Таймаут"))
-                _set_alarm(0)
 
             except Exception as e:
                 print(f"❌ Ошибка обработки {file_path.name}: {e}")
                 failed_files.append((file_path.name, str(e)))
-                _set_alarm(0)
 
         # Итоговая статистика
-        print(f"\n🎉 Обработка завершена!")
+        print("\n🎉 Обработка завершена!")
         print(f"✅ Успешно обработано файлов: {successful_files}/{len(files)}")
-        
+
         if failed_files:
             print(f"❌ Не удалось обработать {len(failed_files)} файлов:")
             for file_name, error in failed_files:
                 print(f"  - {file_name}: {error}")
-        
+
         total_docs = self.collection.count()
         print(f"📊 Всего документов в базе: {total_docs}")
-        
+
         return successful_files > 0
-    
+
     @staticmethod
     def _search_text(text: str) -> str:
         return " ".join(re.findall(r"\w+", text.casefold().replace("ё", "е")))
@@ -509,37 +497,37 @@ class RAGDatabase:
         return expanded
 
     def get_database_stats(self) -> Dict[str, Any]:
-        """
-        Получает статистику базы данных
-        
-        Returns:
-            Словарь со статистикой
+        """Статистика базы: сколько фрагментов и из каких файлов.
+
+        Источники собираются порциями: у больших баз один запрос за всеми
+        метаданными займёт слишком много памяти.
         """
         count = self.collection.count()
-        
-        # Получаем информацию о источниках
+
         sources = set()
         for offset in range(0, count, 1000):
             batch = self.collection.get(include=["metadatas"], limit=1000, offset=offset)
             sources.update(meta.get('source', 'unknown') for meta in batch['metadatas'] if meta)
-        
+
         return {
             'total_chunks': count,
             'sources': list(sources),
             'sources_count': len(sources),
             'collection_name': self.collection_name,
-            'embedding_model': self.embedding_model_name
+            'embedding_model': self.embedding_model_name,
         }
 
 
 def main():
-    """Пересобирает базу из папки с книгами (см. config.yaml)."""
-    print("🚀 Создание векторной базы данных для RAG системы")
-    print("=" * 60)
+    """Пересобирает базу из папки с книгами: python -m core.database.
 
+    Папка берётся из config.yaml (store.research_folder). Повторный запуск
+    обновляет уже проиндексированные файлы, а не добавляет их заново.
+    """
     from config import load_config
 
     cfg = load_config()
+    print(f"🚀 Собираю базу «{cfg.store.collection}» из {cfg.store.research_folder}")
     rag_db = RAGDatabase(
         db_path=cfg.store.db_path,
         collection_name=cfg.store.collection,
@@ -551,25 +539,11 @@ def main():
     )
     rag_db.process_research_folder(cfg.store.research_folder)
 
-    # Показываем статистику
     stats = rag_db.get_database_stats()
-    print("\n📊 Статистика базы данных:")
-    print(f"Всего чанков: {stats['total_chunks']}")
-    print(f"Источников: {stats['sources_count']}")
-    print(f"Файлы: {', '.join(stats['sources'])}")
-
-    # Тестовый поиск
-    print("\n🔍 Тестовый поиск...")
-    test_query = "machine learning"
-    results = rag_db.search_similar(test_query, n_results=3)
-    
-    print(f"Результаты для запроса '{test_query}':")
-    for i, result in enumerate(results, 1):
-        print(f"{i}. Источник: {result['metadata']['source']}")
-        print(f"   Текст: {result['document'][:200]}...")
-        print(f"   Расстояние: {result['distance']:.4f}" if result['distance'] else "")
-        print()
+    print(f"\n📊 В базе {stats['total_chunks']} фрагментов "
+          f"из {stats['sources_count']} файлов")
+    return 0 if stats['total_chunks'] else 1
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
