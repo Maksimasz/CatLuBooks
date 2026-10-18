@@ -63,6 +63,13 @@ class SearchTests(unittest.TestCase):
         results = self.db.search_similar('минестроне', 2)
         self.assertEqual(len(self.db.expand_context(results)), 2)
 
+    def test_vector_only_mode_skips_full_scan(self):
+        self.db.lexical_scan = False
+        self.db.collection.get.reset_mock()
+        result = self.db.search_similar('минестроне', 1)
+        self.assertEqual(result[0]['id'], 'other_chunk_0')
+        self.db.collection.get.assert_not_called()
+
 
 class StoreFormattingTests(unittest.TestCase):
     def make_store(self):

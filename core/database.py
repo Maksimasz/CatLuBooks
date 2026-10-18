@@ -32,6 +32,9 @@ class RAGDatabase:
     # созданные через __new__ (например, в тестах).
     chunk_size = 1000
     chunk_overlap = 200
+    # Полное лексическое сканирование базы. Включает приоритет точных
+    # совпадений, но на большой базе стоит секунды на каждый запрос.
+    lexical_scan = True
 
     def __init__(self, 
                  db_path: str = "./chroma_db",
@@ -285,30 +288,34 @@ class RAGDatabase:
         count = self.collection.count()
         if not count:
             return []
-        words = set(normalized.split()) - {
-            "как", "что", "это", "такое", "для", "или", "мне", "про", "расскажи",
-            "приготовить", "рецепт", "пожалуйста", "какие", "есть", "найди"
-        }
-        words = {word for word in words if len(word) > 2}
-        lexical = []
-        serial = 0
-        # shortcut: постраничный просмотр текста; для большой базы нужен отдельный FTS-индекс.
-        for offset in range(0, count, 256):
-            batch = self.collection.get(limit=256, offset=offset, include=["documents", "metadatas"])
-            for ident, doc, meta in zip(batch['ids'], batch['documents'], batch['metadatas']):
-                text = self._search_text(doc)
-                tokens = set(text.split())
-                hits = len(words & tokens)
-                phrase = normalized in text
-                if not phrase and (not words or hits != len(words)):
-                    continue
-                score = (int(phrase), hits / max(len(words), 1), sum(text.count(word) for word in words))
-                result = {'id': ident, 'document': doc, 'metadata': meta or {}, 'distance': None}
-                heapq.heappush(lexical, (score, serial, result))
-                serial += 1
-                if len(lexical) > n_results:
-                    heapq.heappop(lexical)
-        exact = [item[2] for item in sorted(lexical, reverse=True)]
+        if self.lexical_scan:
+            words = set(normalized.split()) - {
+                "как", "что", "это", "такое", "для", "или", "мне", "про", "расскажи",
+                "приготовить", "рецепт", "пожалуйста", "какие", "есть", "найди"
+            }
+            words = {word for word in words if len(word) > 2}
+            lexical = []
+            serial = 0
+            # shortcut: постраничный просмотр текста; для большой базы нужен отдельный FTS-индекс.
+            for offset in range(0, count, 256):
+                batch = self.collection.get(limit=256, offset=offset, include=["documents", "metadatas"])
+                for ident, doc, meta in zip(batch['ids'], batch['documents'], batch['metadatas']):
+                    text = self._search_text(doc)
+                    tokens = set(text.split())
+                    hits = len(words & tokens)
+                    phrase = normalized in text
+                    if not phrase and (not words or hits != len(words)):
+                        continue
+                    score = (int(phrase), hits / max(len(words), 1), sum(text.count(word) for word in words))
+                    result = {'id': ident, 'document': doc, 'metadata': meta or {}, 'distance': None}
+                    heapq.heappush(lexical, (score, serial, result))
+                    serial += 1
+                    if len(lexical) > n_results:
+                        heapq.heappop(lexical)
+            exact = [item[2] for item in sorted(lexical, reverse=True)]
+        else:
+            # Быстрый режим: только векторный поиск, без сканирования всей базы.
+            exact = []
         embedding = self.embedding_model.encode([query], show_progress_bar=False)
         found = self.collection.query(query_embeddings=embedding.tolist(), n_results=min(count, max(12, n_results)))
         semantic = [

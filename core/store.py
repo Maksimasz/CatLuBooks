@@ -25,6 +25,7 @@ class VectorStore:
             chunk_size=cfg.store.chunk_size,
             chunk_overlap=cfg.store.chunk_overlap,
         )
+        self._db.lexical_scan = cfg.search.lexical
 
     def search(self, query: str, n_results: int | None = None) -> List[Dict[str, Any]]:
         """Поиск с расширением контекста соседними фрагментами."""

@@ -74,6 +74,7 @@ class SearchConfig:
     n_results: int = 3
     max_context_chars: int = 10000
     require_context: bool = True
+    lexical: bool = True          # полное сканирование (точные совпадения) — медленно на большой базе
     history_messages: int = 6
     history_chars: int = 2000
 
