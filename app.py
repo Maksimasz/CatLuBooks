@@ -38,7 +38,22 @@ for _stream in (sys.stdout, sys.stderr):
         _stream.reconfigure(errors="replace")
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
+LOG_DIR = Path(__file__).resolve().parent / "logs"
+LAST_REQUEST = LOG_DIR / "last_request.json"
 CONFIG: Config = load_config()
+
+
+def save_last_request(record: dict) -> None:
+    """Записывает разбор последнего запроса: вопрос, источники и текст контекста.
+
+    Нужен, чтобы разбираться с ответами: видно, что именно ушло в модель.
+    """
+    try:
+        LOG_DIR.mkdir(exist_ok=True)
+        LAST_REQUEST.write_text(
+            json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+    except OSError as exc:
+        print(f"не удалось записать {LAST_REQUEST}: {exc}")
 
 
 def sse(event: str, data) -> str:
@@ -145,18 +160,37 @@ async def stream_chat(req: ChatRequest, app: FastAPI):
 
     yield sse("model", {"provider": provider, "model": model})
 
+    found = store.sources(results) if results else []
+    print(f"❓ {req.message}  ({provider}/{model}, фрагментов {len(results)}, "
+          f"контекст {len(context)} символов)", flush=True)
+    record = {
+        "время": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "провайдер": provider,
+        "модель": model,
+        "вопрос": req.message,
+        "история": [{"role": msg.role, "content": msg.content} for msg in req.history],
+        "контекст_символов": len(context),
+        "источники": found,
+        "контекст": context,
+    }
+    save_last_request(record)
+
     if results:
-        yield sse("sources", store.sources(results))
+        yield sse("sources", found)
     elif CONFIG.search.require_context:
         yield sse("token", {"text": "В базе не найдено фрагментов для ответа на этот вопрос."})
         yield sse("done", {})
         return
 
+    answer: list[str] = []
     try:
         async for piece in llm.stream(build_messages(req, context)):
+            answer.append(piece)
             yield sse("token", {"text": piece})
     except LLMError as exc:
         yield sse("error", {"message": str(exc)})
+    record["ответ"] = "".join(answer)
+    save_last_request(record)
     yield sse("done", {})
 
 

@@ -32,10 +32,15 @@ UNITS = {".pdf": "страница", ".epub": "раздел", ".txt": "част�
 LEADER_DOTS = re.compile(r"(?:\.\s*){4,}")                # «Борщ ......... 27» и «Борщ . . . 27»
 NUMBERED_INDEX = re.compile(r"\b\d{2,4}\.?\s*[А-ЯЁ]")     # «177. Борщ», «Клафути 118 Авокадо»
 GLYPH_GARBAGE = re.compile(r"/g\d+")                      # сломанный шрифт PDF
+# Столбцы технологической карты: числа на такой странице — граммовки, а не
+# номера страниц указателя, поэтому страница остаётся в базе.
+TABLE_MARKERS = re.compile(r"брутто|нетто|расход сырья|рецептура|"
+                           r"технологическая карта", re.IGNORECASE)
 PAGE_MARKER = re.compile(r"^[-—–\s]*(Страница|Фото|Содержание|Оглавление)\b",
                          re.IGNORECASE)
 PAGE_HEADER = re.compile(r"^\d{1,4}\s*[|•·]\s*")          # колонтитул «38 | РЕЦЕПТЫ»
 NUMBER_ONLY_LINE = re.compile(r"^[\d\s.,;:|/\\\-–—()\[\]]+$")
+PAGE_NUMBER_LINE = re.compile(r"^\d{1,4}$")               # колонцифра «126»
 LINE_BREAK_HYPHEN = re.compile(r"(\w)-\s*\n\s*(\w)")      # «ку-рицу» -> «курицу»
 ANY_LETTER_WORD = re.compile(r"[A-Za-zА-Яа-яЁё]{2,}")
 LATIN_WORD = re.compile(r"^[A-Za-z]{2,}$")
@@ -67,15 +72,28 @@ def unit_for(path) -> str:
 
 
 def clean_text(text: str) -> str:
-    """Убирает колонтитулы и переносы, оставляя читаемый текст."""
+    """Убирает колонтитулы и переносы, оставляя читаемый текст.
+
+    Числа сохраняются: в технологических картах количество продукта напечатано
+    отдельной строкой под названием («Картофель», «80», «60»), и раньше такие
+    строки пропадали как колонцифры — рецепт уходил в модель без граммовок.
+    Колонцифрой считается только одинокое число в самой верхней или самой
+    нижней строке страницы; числа внутри страницы — это данные таблицы.
+    """
     text = re.sub(r"\u00ad\s*", "", text)      # мягкий перенос внутри слова
     lines = []
     for line in text.splitlines():
         line = PAGE_HEADER.sub("", line.strip())
-        if not line or NUMBER_ONLY_LINE.match(line):
-            continue                            # пустая строка или колонцифра
+        if not line:
+            continue
+        if NUMBER_ONLY_LINE.match(line) and not any(ch.isdigit() for ch in line):
+            continue                            # строка из одних разделителей
         lines.append(line)
-    text = "\n".join(lines)
+    content = [
+        line for i, line in enumerate(lines)
+        if not (PAGE_NUMBER_LINE.match(line) and i in (0, len(lines) - 1))
+    ]
+    text = "\n".join(content)
     text = LINE_BREAK_HYPHEN.sub(r"\1\2", text)  # перенос по слогам
     text = re.sub(r"\n+", " ", text)
     # Оставляем буквы, цифры и обычную пунктуацию, остальное — в пробел.
@@ -120,16 +138,27 @@ def is_title_list(text: str) -> bool:
     return sum(1 for word in words if COOKING_VERB.match(word)) <= TITLE_MAX_VERBS
 
 
+def has_recipe_table(text: str) -> bool:
+    """Страница технологической карты: столбцы «брутто/нетто» или номер рецептуры.
+
+    В такой таблице числа — это граммовки продуктов, поэтому страница не
+    указатель, как бы много чисел на ней ни было.
+    """
+    return bool(TABLE_MARKERS.search(text))
+
+
 def is_listing(text: str) -> bool:
     """Оглавление, указатель или мусор распознавания, но не текст рецепта.
 
     Записи указателя узнаются по паре «блюдо + номер страницы»: «177. Борщ с
-    картофелем», «Клафути 118 Авокадо». В рецепте чисел много, но единицы
-    измерения рядом («варить 20 минут», «249/200 г»), поэтому доля чисел
-    проверяется отдельно — иначе пострадали бы технологические карты.
+    картофелем», «Клафути 118 Авокадо». В технологических картах чисел не
+    меньше, но там это граммовки, поэтому таблицы рецептур проверяются
+    отдельно — иначе вместе с указателями пропали бы все количества.
     """
     if has_leader_dots(text) or has_broken_glyphs(text) or is_title_list(text):
         return True
+    if has_recipe_table(text):
+        return False
     share, _ = _digit_share(text)
     return len(NUMBERED_INDEX.findall(text)) >= NUMBERED_MIN and share >= LISTING_DIGIT_SHARE
 

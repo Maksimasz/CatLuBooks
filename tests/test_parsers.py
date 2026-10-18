@@ -17,11 +17,17 @@ class CleanTextTests(unittest.TestCase):
         self.assertIn('приготовления', parsers.clean_text('до пригото-\nвления'))
 
     def test_running_header_and_page_numbers_are_dropped(self):
-        text = parsers.clean_text('38 | РЕЦЕПТЫ\n42\nОбжарить лук.\n')
+        text = parsers.clean_text('38 | РЕЦЕПТЫ\nОбжарить лук.\n120\n')
         self.assertEqual(text, 'РЕЦЕПТЫ Обжарить лук.')
 
     def test_lines_are_joined_into_a_paragraph(self):
         self.assertEqual(parsers.clean_text('первая\nвторая'), 'первая вторая')
+
+    def test_table_values_survive(self):
+        """В технологических картах граммовки напечатаны отдельными строками."""
+        text = parsers.clean_text('126\nНаименование сырья\nКартофель\n80\n60\n'
+                                  'Морковь\n15\n12\n127')
+        self.assertEqual(text, 'Наименование сырья Картофель 80 60 Морковь 15 12')
 
 
 class NoiseTests(unittest.TestCase):
@@ -33,6 +39,16 @@ class NoiseTests(unittest.TestCase):
              '183. Борщ украинский 184. Борщ сибирский 185. Борщ полтавский '
              '186. Борщ с квашеной капустой 187. Борщ с картофелем '
              '188. Борщ с фрикадельками 189. Борщ летний 190. Борщ с грибами')
+    TECH_CARD = (
+        'РЕЦЕПТУРА 182, БОРЩ С ФАСОЛЬЮ И КАРТОФЕЛЕМ Расход сырья на 1 порцию, г '
+        'Наименование сырья 1 и 1 брутто нетто брутто [ нето брутто нетто Свекла '
+        '60 48 100 89 100 80 Картофель 40 30 67 50 67 50 Фасоль 12 12 20 20 20 20 '
+        'Морковь 15 12 25 20 25 20 Петрушка (корень) 4 3 7 5 со В Лук репчатый '
+        '14 12 24 20 24 20 Томат-пюре 9 9 15 15 15 15 Кулинарный жир 6 6 10 10 '
+        '10 10 или маргарин 7,3 7,3 12,2 12,2 12,2 12,2 Чеснок 1,2 1 2 1,5 2 1,5 '
+        'Сахар 2 2 В 3 К 3 Уксус 9% 1,65 1,65 2,64 2,64 2,64 2,64 Бульон или '
+        'воде 240 240 400 400 400 400 Перец горошком 0,03 0,03 0,05 0,05 0,05 '
+        '0,05 Соль 2 2 4 4 4 4 Сметана 10 10 10 10 10 10 Выход 300/10 500/10 500')
 
     def test_contents_page_is_listing(self):
         self.assertTrue(parsers.is_listing(
@@ -59,6 +75,19 @@ class NoiseTests(unittest.TestCase):
 
     def test_recipe_is_not_listing(self):
         self.assertFalse(parsers.is_listing(self.RECIPE))
+
+    def test_recipe_table_is_not_listing(self):
+        """Техкарта с граммовками — не указатель, хотя чисел на ней много."""
+        self.assertFalse(parsers.is_listing(self.TECH_CARD))
+
+    def test_table_marker_wins_over_numbered_index(self):
+        """Те же номера страниц, но со столбцами техкарты — это не указатель."""
+        index_like = ' '.join(f'{100 + i}. Борщ {i}' for i in range(12))
+        self.assertTrue(parsers.is_listing(index_like))
+        self.assertFalse(parsers.is_listing(index_like + ' брутто нетто'))
+
+    def test_recipe_table_is_kept(self):
+        self.assertTrue(parsers.keep_section(self.TECH_CARD))
 
     def test_title_list_without_numbers_is_listing(self):
         """Оглавление без номеров страниц: «Хоровац Гриль салат Террин …»."""
