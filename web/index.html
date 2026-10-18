@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#0f172a">
-  <meta name="description" content="RAG-ассистент по кулинарным книгам">
-  <title>RAG Ассистент</title>
+  <meta name="description" content="RAG-ассистент по книгам и документам">
+  <title>CatLuBooks</title>
   <link rel="manifest" href="/manifest.webmanifest">
   <link rel="icon" href="/icon-192.png">
   <link rel="apple-touch-icon" href="/icon-192.png">
@@ -13,9 +13,19 @@
 </head>
 <body>
   <header class="topbar">
-    <div class="brand"><span class="dot"></span> RAG Ассистент</div>
-    <div class="stats" id="stats">загрузка…</div>
+    <div class="brand"><span class="dot"></span> CatLuBooks</div>
+    <div class="controls">
+      <select id="provider" title="Провайдер модели"></select>
+      <input id="model" list="model-list" placeholder="модель" title="Модель" autocomplete="off" spellcheck="false">
+      <datalist id="model-list"></datalist>
+      <button id="keybtn" type="button" title="Ввести API-ключ">🔑</button>
+    </div>
   </header>
+
+  <div class="subbar">
+    <span id="stats">загрузка…</span>
+    <span id="status"></span>
+  </div>
 
   <main id="chat" class="chat"></main>
 

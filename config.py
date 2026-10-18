@@ -12,19 +12,14 @@ from typing import Any, Dict, Type, TypeVar
 
 import yaml
 
+from core.providers import base_url_for, key_for
+
 # На консоли Windows (cp866/cp1251) печать эмодзи падает с UnicodeEncodeError.
 for _stream in (sys.stdout, sys.stderr):
     if hasattr(_stream, "reconfigure"):
         _stream.reconfigure(errors="replace")
 
 DEFAULT_CONFIG_PATH = "config.yaml"
-
-# Адреса по умолчанию для известных провайдеров (все — OpenAI-совместимые).
-DEFAULT_BASE_URLS = {
-    "ollama": "http://localhost:11434/v1",
-    "openai": "https://api.openai.com/v1",
-    "openrouter": "https://openrouter.ai/api/v1",
-}
 
 DEFAULT_SYSTEM = (
     "Ты — полезный ассистент. Отвечай на русском языке. "
@@ -108,12 +103,25 @@ def _from_dict(cls: Type[T], data: Any) -> T:
 def _resolve_llm(llm: LLMConfig) -> None:
     """Подставляет base_url/api_key под выбранного провайдера."""
     if not llm.base_url:
-        llm.base_url = DEFAULT_BASE_URLS.get(llm.provider, DEFAULT_BASE_URLS["ollama"])
+        llm.base_url = base_url_for(llm.provider)
     if not llm.api_key:
-        llm.api_key = os.environ.get("LLM_API_KEY", "")
-    if not llm.api_key and llm.provider == "ollama":
-        # Ollama ключ игнорирует, но поле должно быть непустым для заголовка.
-        llm.api_key = "ollama"
+        llm.api_key = key_for(llm.provider)
+
+
+def resolve_llm(base: LLMConfig, provider: str | None = None,
+                model: str | None = None) -> LLMConfig:
+    """Собирает LLMConfig для конкретного провайдера/модели (для смены на лету)."""
+    llm = LLMConfig(
+        provider=provider or base.provider,
+        model=model or base.model,
+        base_url="",
+        api_key="",
+        temperature=base.temperature,
+        top_p=base.top_p,
+        max_tokens=base.max_tokens,
+    )
+    _resolve_llm(llm)
+    return llm
 
 
 def load_config(path: str | None = None) -> Config:

@@ -60,7 +60,7 @@ search:
   n_results: 2              # сколько фрагментов искать
   max_context_chars: 4000   # лимит контекста, передаваемого модели
   require_context: true     # true: без найденных фрагментов ассистент не отвечает
-  lexical: false            # false — быстрый векторный поиск; true — +точные совпадения (медленно на большой базе)
+  lexical: true             # true — приоритет точных совпадений (быстро, через индекс Chroma); false — только векторный поиск
   history_messages: 6
   history_chars: 2000
 

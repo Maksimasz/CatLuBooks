@@ -5,8 +5,16 @@ const formEl = document.getElementById("composer");
 const inputEl = document.getElementById("input");
 const sendEl = document.getElementById("send");
 const statsEl = document.getElementById("stats");
+const statusEl = document.getElementById("status");
+const providerEl = document.getElementById("provider");
+const modelEl = document.getElementById("model");
+const modelListEl = document.getElementById("model-list");
+const keyBtn = document.getElementById("keybtn");
 
 const history = [];
+let providers = {};
+const LS_PROVIDER = "catlu.provider";
+const LS_MODEL = "catlu.model";
 
 function el(tag, cls, text) {
   const node = document.createElement(tag);
@@ -14,6 +22,86 @@ function el(tag, cls, text) {
   if (text != null) node.textContent = text;
   return node;
 }
+
+function currentProvider() { return providerEl.value; }
+function currentModel() { return modelEl.value.trim(); }
+
+function setStatus(text) { statusEl.textContent = text || ""; }
+
+function updateStatus() {
+  const p = providers[currentProvider()];
+  if (!p) { setStatus(""); return; }
+  if (p.needs_key && !p.configured) {
+    setStatus(`нужен ключ для «${p.name}» 🔑`);
+  } else {
+    setStatus("");
+  }
+}
+
+function fillModels(providerName, preferred) {
+  const p = providers[providerName];
+  modelListEl.innerHTML = "";
+  (p?.models || []).forEach((m) => modelListEl.appendChild(el("option", null, m)));
+  const saved = preferred ?? localStorage.getItem(LS_MODEL);
+  modelEl.value = (saved && (!p?.models?.length || p.models.includes(saved)))
+    ? saved
+    : (p?.models?.[0] || saved || "");
+}
+
+async function loadProviders() {
+  let data;
+  try {
+    data = await (await fetch("/api/providers")).json();
+  } catch {
+    return;
+  }
+  providers = {};
+  data.providers.forEach((p) => { providers[p.name] = p; });
+
+  providerEl.innerHTML = "";
+  data.providers.forEach((p) => {
+    const opt = el("option", null, p.configured || !p.needs_key ? p.label : `${p.label} — нужен ключ`);
+    opt.value = p.name;
+    providerEl.appendChild(opt);
+  });
+
+  const savedProvider = localStorage.getItem(LS_PROVIDER);
+  providerEl.value = providers[savedProvider] ? savedProvider : (data.default?.provider || "ollama");
+  const preferredModel = providerEl.value === (data.default?.provider) ? data.default?.model : null;
+  fillModels(providerEl.value, preferredModel);
+  localStorage.setItem(LS_MODEL, currentModel());
+  updateStatus();
+}
+
+providerEl.addEventListener("change", () => {
+  localStorage.setItem(LS_PROVIDER, currentProvider());
+  fillModels(currentProvider());
+  localStorage.setItem(LS_MODEL, currentModel());
+  updateStatus();
+});
+
+modelEl.addEventListener("change", () => localStorage.setItem(LS_MODEL, currentModel()));
+
+keyBtn.addEventListener("click", async () => {
+  const name = currentProvider();
+  const p = providers[name];
+  const label = p ? p.label : name;
+  const key = window.prompt(`API-ключ для «${label}»:\n(хранится только на этом компьютере)`);
+  if (key == null) return;
+  try {
+    const r = await fetch("/api/keys", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ provider: name, key }),
+    });
+    if (!r.ok) throw new Error(await r.text());
+    setStatus(key.trim() ? "ключ сохранён" : "ключ удалён");
+    await loadProviders();
+    setTimeout(() => updateStatus(), 1500);
+  } catch (err) {
+    setStatus("не удалось сохранить ключ");
+  }
+});
 
 function addMessage(role, text) {
   const wrap = el("div", "msg " + role);
@@ -62,9 +150,14 @@ async function streamChat(message, prior) {
     response = await fetch("/api/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message, history: prior }),
+      body: JSON.stringify({
+        message,
+        history: prior,
+        provider: currentProvider(),
+        model: currentModel(),
+      }),
     });
-  } catch (err) {
+  } catch {
     bubble.classList.remove("typing");
     bubble.textContent = "⚠️ Нет связи с сервером.";
     return;
@@ -98,6 +191,8 @@ async function streamChat(message, prior) {
         chatEl.scrollTop = chatEl.scrollHeight;
       } else if (ev.event === "sources") {
         sources = ev.data;
+      } else if (ev.event === "model") {
+        setStatus(`${ev.data.provider} · ${ev.data.model}`);
       } else if (ev.event === "error") {
         text += (text ? "\n\n" : "") + "⚠️ " + (ev.data.message || "Ошибка");
         bubble.textContent = text;
@@ -146,10 +241,10 @@ inputEl.addEventListener("input", () => {
 
 fetch("/api/stats")
   .then((r) => r.json())
-  .then((s) => {
-    statsEl.textContent = `${s.total_chunks} фрагментов · ${s.sources_count} файлов`;
-  })
+  .then((s) => { statsEl.textContent = `${s.total_chunks} фрагментов · ${s.sources_count} файлов`; })
   .catch(() => { statsEl.textContent = "нет данных"; });
+
+loadProviders();
 
 if ("serviceWorker" in navigator) {
   navigator.serviceWorker.register("/sw.js").catch(() => {});

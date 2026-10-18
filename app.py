@@ -15,13 +15,14 @@ import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from config import Config, load_config
+from config import Config, load_config, resolve_llm
 from core.llm import LLMError, OpenAICompatClient
+from core.providers import key_for, needs_key, provider_catalog, save_secret
 from core.store import VectorStore
 
 for _stream in (sys.stdout, sys.stderr):
@@ -41,13 +42,16 @@ def sse(event: str, data) -> str:
 async def lifespan(app: FastAPI):
     print(f"Загружаю RAG-ядро (коллекция «{CONFIG.store.collection}»)...")
     app.state.store = await asyncio.to_thread(VectorStore, CONFIG)
-    app.state.llm = OpenAICompatClient(CONFIG.llm)
+    app.state.clients = {}  # (provider, model) -> OpenAICompatClient
     stats = app.state.store.stats()
     print(f"Готово: {stats['total_chunks']} фрагментов, источников: {stats['sources_count']}")
-    print(f"Модель: {CONFIG.llm.model} ({CONFIG.llm.provider})")
+    print(f"Модель по умолчанию: {CONFIG.llm.model} ({CONFIG.llm.provider})")
     print(f"Открой http://localhost:{CONFIG.server.port}")
-    yield
-    await app.state.llm.aclose()
+    try:
+        yield
+    finally:
+        for client in app.state.clients.values():
+            await client.aclose()
 
 
 app = FastAPI(title="RAG Ассистент", lifespan=lifespan)
@@ -61,11 +65,28 @@ class ChatMessage(BaseModel):
 class ChatRequest(BaseModel):
     message: str
     history: list[ChatMessage] = Field(default_factory=list)
+    provider: str | None = None
+    model: str | None = None
 
 
 class SearchRequest(BaseModel):
     query: str
     n_results: int | None = None
+
+
+class KeyRequest(BaseModel):
+    provider: str
+    key: str = ""
+
+
+def get_client(app: FastAPI, provider: str, model: str) -> OpenAICompatClient:
+    """Клиент для пары (провайдер, модель), создаётся один раз и кэшируется."""
+    cache_key = (provider, model)
+    client = app.state.clients.get(cache_key)
+    if client is None:
+        client = OpenAICompatClient(resolve_llm(CONFIG.llm, provider, model))
+        app.state.clients[cache_key] = client
+    return client
 
 
 def build_messages(req: ChatRequest, context: str) -> list[dict]:
@@ -89,9 +110,22 @@ def build_messages(req: ChatRequest, context: str) -> list[dict]:
 
 
 async def stream_chat(req: ChatRequest, app: FastAPI):
-    """Генератор SSE-событий: поиск → источники → стриминг ответа."""
+    """Генератор SSE-событий: проверка модели → поиск → источники → ответ."""
     store: VectorStore = app.state.store
-    llm: OpenAICompatClient = app.state.llm
+    provider = req.provider or CONFIG.llm.provider
+    model = req.model or CONFIG.llm.model
+
+    if needs_key(provider) and not key_for(provider):
+        yield sse("error", {"message": f"Для «{provider}» нужен API-ключ. Введите его кнопкой 🔑 в шапке."})
+        yield sse("done", {})
+        return
+
+    try:
+        llm = get_client(app, provider, model)
+    except Exception as exc:
+        yield sse("error", {"message": f"Не удалось настроить «{provider}»: {exc}"})
+        yield sse("done", {})
+        return
 
     try:
         results = await asyncio.to_thread(store.search, req.message, None)
@@ -100,6 +134,8 @@ async def stream_chat(req: ChatRequest, app: FastAPI):
         yield sse("error", {"message": f"Ошибка поиска: {exc}"})
         yield sse("done", {})
         return
+
+    yield sse("model", {"provider": provider, "model": model})
 
     if results:
         yield sse("sources", store.sources(results))
@@ -145,6 +181,22 @@ async def config():
         "collection": CONFIG.store.collection,
         "embedding_model": CONFIG.embeddings.model,
     }
+
+
+@app.get("/api/providers")
+async def providers():
+    return {
+        "providers": provider_catalog(),
+        "default": {"provider": CONFIG.llm.provider, "model": CONFIG.llm.model},
+    }
+
+
+@app.post("/api/keys")
+async def set_key(req: KeyRequest):
+    if req.provider not in {item["name"] for item in provider_catalog()}:
+        raise HTTPException(status_code=400, detail="Неизвестный провайдер")
+    save_secret(req.provider, req.key.strip())
+    return {"ok": True, "configured": bool(key_for(req.provider))}
 
 
 # Статика (index.html, app.js, PWA) — монтируется последней, чтобы

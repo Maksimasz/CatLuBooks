@@ -1,7 +1,5 @@
-"""Ядро RAG-ассистента: хранилище, модель, поиск."""
+"""Ядро RAG-ассистента.
 
-from core.database import RAGDatabase
-from core.llm import LLMError, OpenAICompatClient
-from core.store import VectorStore
-
-__all__ = ["RAGDatabase", "VectorStore", "LLMError", "OpenAICompatClient"]
+Подмодули импортируются напрямую (core.database, core.llm, core.store),
+чтобы импорт пакета не тянул тяжёлые зависимости — модели и ChromaDB.
+"""

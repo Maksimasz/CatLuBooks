@@ -32,9 +32,9 @@ class RAGDatabase:
     # созданные через __new__ (например, в тестах).
     chunk_size = 1000
     chunk_overlap = 200
-    # Полное лексическое сканирование базы. Включает приоритет точных
-    # совпадений, но на большой базе стоит секунды на каждый запрос.
-    lexical_scan = True
+    # Точные совпадения по словам (через индекс Chroma). Быстро на большой
+    # базе; можно отключить, чтобы искать только векторно.
+    lexical = True
 
     def __init__(self, 
                  db_path: str = "./chroma_db",
@@ -288,34 +288,14 @@ class RAGDatabase:
         count = self.collection.count()
         if not count:
             return []
-        if self.lexical_scan:
-            words = set(normalized.split()) - {
-                "как", "что", "это", "такое", "для", "или", "мне", "про", "расскажи",
-                "приготовить", "рецепт", "пожалуйста", "какие", "есть", "найди"
-            }
-            words = {word for word in words if len(word) > 2}
-            lexical = []
-            serial = 0
-            # shortcut: постраничный просмотр текста; для большой базы нужен отдельный FTS-индекс.
-            for offset in range(0, count, 256):
-                batch = self.collection.get(limit=256, offset=offset, include=["documents", "metadatas"])
-                for ident, doc, meta in zip(batch['ids'], batch['documents'], batch['metadatas']):
-                    text = self._search_text(doc)
-                    tokens = set(text.split())
-                    hits = len(words & tokens)
-                    phrase = normalized in text
-                    if not phrase and (not words or hits != len(words)):
-                        continue
-                    score = (int(phrase), hits / max(len(words), 1), sum(text.count(word) for word in words))
-                    result = {'id': ident, 'document': doc, 'metadata': meta or {}, 'distance': None}
-                    heapq.heappush(lexical, (score, serial, result))
-                    serial += 1
-                    if len(lexical) > n_results:
-                        heapq.heappop(lexical)
-            exact = [item[2] for item in sorted(lexical, reverse=True)]
-        else:
-            # Быстрый режим: только векторный поиск, без сканирования всей базы.
-            exact = []
+        words = set(normalized.split()) - {
+            "как", "что", "это", "такое", "для", "или", "мне", "про", "расскажи",
+            "приготовить", "рецепт", "пожалуйста", "какие", "есть", "найди"
+        }
+        words = {word for word in words if len(word) > 2}
+        # Точные совпадения ищем индексом Chroma, а не сканированием всей базы:
+        # это быстро и сохраняет приоритет точных совпадений над похожестью.
+        exact = self._contains_matches(words, normalized, n_results) if self.lexical else []
         embedding = self.embedding_model.encode([query], show_progress_bar=False)
         found = self.collection.query(query_embeddings=embedding.tolist(), n_results=min(count, max(12, n_results)))
         semantic = [
@@ -333,6 +313,45 @@ class RAGDatabase:
             if len(results) == n_results:
                 break
         return results
+
+    def _contains_matches(self, words, normalized, n_results):
+        """Точные совпадения через where_document (инвертированный индекс Chroma).
+
+        Найденные кандидаты ранжируются так же, как при полном сканировании:
+        сначала целая фраза, затем доля совпавших слов и их частота.
+        """
+        if not words:
+            return []
+        variants = set()
+        for word in words:
+            variants.update({word, word.capitalize(), word.upper()})
+        clauses = [{"$contains": variant} for variant in sorted(variants) if variant]
+        where = {"$or": clauses} if len(clauses) > 1 else clauses[0]
+        try:
+            batch = self.collection.get(
+                where_document=where,
+                limit=max(200, n_results * 20),
+                include=["documents", "metadatas"],
+            )
+        except Exception:
+            # Старые версии Chroma могут не поддерживать $contains.
+            return []
+        lexical = []
+        serial = 0
+        for ident, doc, meta in zip(batch['ids'], batch['documents'], batch['metadatas']):
+            text = self._search_text(doc)
+            tokens = set(text.split())
+            hits = len(words & tokens)
+            phrase = normalized in text
+            if not phrase and hits != len(words):
+                continue
+            score = (int(phrase), hits / len(words), sum(text.count(word) for word in words))
+            result = {'id': ident, 'document': doc, 'metadata': meta or {}, 'distance': None}
+            heapq.heappush(lexical, (score, serial, result))
+            serial += 1
+            if len(lexical) > n_results:
+                heapq.heappop(lexical)
+        return [item[2] for item in sorted(lexical, reverse=True)]
 
     def expand_context(self, results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Добавляет по одному соседнему фрагменту с каждой стороны."""
