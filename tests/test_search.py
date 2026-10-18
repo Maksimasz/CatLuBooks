@@ -93,6 +93,64 @@ class SearchTests(unittest.TestCase):
         self.assertEqual(result[0]['id'], 'drum_chunk_1')
 
 
+class RankingTests(unittest.TestCase):
+    """Ранжирование: рецепт важнее оглавления, где слово лишь упомянуто."""
+
+    def setUp(self):
+        self.db = module.RAGDatabase.__new__(module.RAGDatabase)
+
+    def test_noise_detection(self):
+        self.assertTrue(self.db._is_noise(
+            'СУПЫ Борщ .......... 27 Гаспачо .......... 30 Суп ......... 31'))
+        self.assertTrue(self.db._is_noise(
+            '177. Борщ с капустой 178. Борщ с черносливом 179. Борщ московский '
+            '180. Борщ флотский 181. Борщ с фасолью'))
+        self.assertTrue(self.db._is_noise(
+            'Свекла 82 275 Свинина 151 202 205 240 Сельдерей 162 163 Сливки 37 178 '
+            '180 238 Сметана 53 56 Соевый 16 17 Сумах 110 131 Сыр 177 180 Грибы '
+            '12 13 14 15 Орехи 44 45 46 Рыба 90 91 92'))
+        self.assertTrue(self.db._is_noise('--- Страница 205 --- Фото к рецепту'))
+        self.assertTrue(self.db._is_noise('/g299/g301/g297/g309/g15/g3/g298/g282/g285/g301/g3'))
+        self.assertFalse(self.db._is_noise('Обжарить лук 5 минут, добавить морковь.'))
+        self.assertFalse(self.db._is_noise(
+            '1. Подготовка мяса: залейте язык водой и варите 10 минут. '
+            '2. Тушение: добавьте морковь и тушите 2 часа.'))
+
+    def test_recipe_outranks_contents_page(self):
+        # В оглавлении слов запроса больше, но толку от него нет.
+        candidates = {
+            'toc': {
+                'id': 'toc', 'metadata': {}, 'distance': None, 'matched': 3,
+                'weight': 0.01, 'count': 9,
+                'document': 'СУПЫ Куриный суп-лапша ......... 38 Суп гороховый ......... 31 '
+                            'Суп борщ ......... 27',
+            },
+            'recipe': {
+                'id': 'recipe', 'metadata': {}, 'distance': None, 'matched': 3,
+                'weight': 0.01, 'count': 3,
+                'document': 'КУРИНЫЙ СУП-ЛАПША ИНГРЕДИЕНТЫ: 3 луковицы '
+                            'ПРИГОТОВЛЕНИЕ: варить 45 минут',
+            },
+        }
+        ranked = self.db._rank_lexical(candidates, 'куриный суп лапша')
+        self.assertEqual(ranked[0]['id'], 'recipe')
+
+    def test_short_precise_chunk_beats_long_one(self):
+        # Совпадений поровну — выигрывает более короткий, точечный фрагмент.
+        candidates = {
+            'long': {
+                'id': 'long', 'metadata': {}, 'distance': None, 'matched': 2,
+                'weight': 0.01, 'count': 4, 'document': 'Плов и вода и соль ' * 100,
+            },
+            'short': {
+                'id': 'short', 'metadata': {}, 'distance': None, 'matched': 2,
+                'weight': 0.01, 'count': 4, 'document': 'Плов с водой: рецепт',
+            },
+        }
+        ranked = self.db._rank_lexical(candidates, 'плов вода')
+        self.assertEqual(ranked[0]['id'], 'short')
+
+
 class StoreFormattingTests(unittest.TestCase):
     def make_store(self):
         store = VectorStore.__new__(VectorStore)

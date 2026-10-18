@@ -33,17 +33,34 @@ class VectorStore:
         return self._db.expand_context(self._db.search_similar(query, n_results=n))
 
     def format_context(self, results: List[Dict[str, Any]]) -> str:
-        """Превращает найденные фрагменты в текст для промпта."""
-        parts = []
+        """Превращает найденные фрагменты в текст для промпта.
+
+        Фрагменты добавляются целиком: разрезанный пополам рецепт модели
+        бесполезен. Если в лимит не влезает — фрагмент пропускается; частично
+        показывается только самый важный (первый), чтобы ответ не остался
+        совсем без данных.
+        """
+        budget = self.cfg.search.max_context_chars
+        parts: List[str] = []
+        used = 0
         for i, result in enumerate(results, 1):
             meta = result.get("metadata") or {}
             source = meta.get("source", "Неизвестный источник")
             page = meta.get("page")
             if page is not None:
                 source += f", страница PDF {page}"
-            parts.append(f"Источник {i} ({source}):\n{result.get('document', '')}")
-        context = "\n\n".join(parts)
-        return context[: self.cfg.search.max_context_chars]
+            piece = f"Источник {i} ({source}):\n{result.get('document', '')}"
+            gap = 2 if parts else 0
+            room = budget - used - gap
+            if room <= 0:
+                break
+            if len(piece) > room:
+                if parts:
+                    continue  # не режем рецепт посередине — попробуем следующий
+                piece = piece[:room]
+            parts.append(piece)
+            used += len(piece) + gap
+        return "\n\n".join(parts)
 
     def sources(self, results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Краткое описание источников (без дублей) для интерфейса."""

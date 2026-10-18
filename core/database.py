@@ -349,6 +349,9 @@ class RAGDatabase:
             for ident, doc, meta, distance in zip(found['ids'][0], found['documents'][0],
                                                   found['metadatas'][0], found['distances'][0])
         ]
+        # Оглавления, указатели и OCR-мусор — в конец списка, но не выбрасываем:
+        # если ничего другого нет, лучше такой фрагмент, чем ничего.
+        semantic.sort(key=lambda item: self._is_noise(item['document']))
 
         # Фрагмент, поднявшийся высоко в обоих списках, обгоняет того, кто
         # оказался высоко только в одном. У словесного списка приоритет выше:
@@ -417,15 +420,55 @@ class RAGDatabase:
         return candidates
 
     def _rank_lexical(self, candidates, normalized: str) -> List[Dict[str, Any]]:
-        """Сортирует словесных кандидатов: фраза, редкость слов, число попаданий."""
+        """Сортирует словесных кандидатов: осмысленный текст, затем точность.
+
+        Оглавления и служебные маркеры отодвигаются в конец: в оглавлении
+        название блюда встречается рядом с номерами страниц, и по числу
+        совпадений оно обгоняло сам рецепт. Плотность совпадений важнее
+        их абсолютного числа, иначе длинный фрагмент побеждает короткий.
+        """
         items = list(candidates.values())
         for item in items:
-            item['phrase'] = normalized in self._search_text(item['document'])
+            text = self._search_text(item['document'])
+            item['phrase'] = normalized in text
+            item['noise'] = self._is_noise(item['document'])
+            item['density'] = item['count'] * 1000 / max(1, len(item['document']))
         items.sort(
-            key=lambda item: (item['phrase'], item['weight'], item['matched'], item['count']),
-            reverse=True,
+            key=lambda item: (
+                item['noise'],
+                not item['phrase'],
+                -item['weight'],
+                -item['matched'],
+                -item['count'],
+                -item['density'],  # добивка: при равном числе совпадений короче — точнее
+            )
         )
         return items
+
+    @staticmethod
+    def _is_noise(text: str) -> bool:
+        """Оглавление, предметный указатель, маркер страницы или OCR-мусор.
+
+        Такие фрагменты не содержат рецепта, но могут много раз повторять
+        название блюда — и по старой логике обгоняли сам рецепт.
+        """
+        if len(re.findall(r"\.{4,}", text)) >= 3:
+            return True  # строка оглавления: «Борщ ......... 27»
+        if len(re.findall(r"\b\d{2,4}\.\s*[А-ЯЁ]", text)) >= 5:
+            return True  # предметный указатель: «177. Борщ с картофелем 178. Борщ»
+        if len(re.findall(r"/g\d+", text)) >= 10:
+            return True  # сломанная распознавалка: «/g299/g301/g297»
+        tokens = re.findall(r"\w+", text)
+        if len(tokens) >= 30:
+            numbers = sum(1 for token in tokens if token.isdigit())
+            if numbers / len(tokens) >= 0.35:
+                return True  # алфавитный указатель: «Свекла 82 275 Свинина 151»
+        stripped = text.strip()
+        return bool(
+            len(stripped) < 200
+            and re.match(r"^[-—–\s]*(Страница|Фото|Содержание|Оглавление)\b",
+                         stripped, re.IGNORECASE)
+        )
 
     def expand_context(self, results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Добавляет по одному соседнему фрагменту с каждой стороны."""
