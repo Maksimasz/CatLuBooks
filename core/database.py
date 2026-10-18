@@ -11,7 +11,6 @@ import logging
 from typing import List, Dict, Any, Optional
 from pathlib import Path
 import re
-import heapq
 
 import PyPDF2
 import chromadb
@@ -35,6 +34,12 @@ class RAGDatabase:
     # Точные совпадения по словам (через индекс Chroma). Быстро на большой
     # базе; можно отключить, чтобы искать только векторно.
     lexical = True
+    # Служебные слова запроса: по ним рецепт не ищут, они только добавляют шум.
+    STOPWORDS = frozenset({
+        "как", "что", "это", "такое", "для", "или", "мне", "про", "расскажи",
+        "приготовить", "приготовление", "готовить", "рецепт", "пожалуйста",
+        "какие", "есть", "найди", "можно", "нужно", "надо", "хочу", "сделать",
+    })
 
     def __init__(self, 
                  db_path: str = "./chroma_db",
@@ -280,78 +285,147 @@ class RAGDatabase:
     def _search_text(text: str) -> str:
         return " ".join(re.findall(r"\w+", text.casefold().replace("ё", "е")))
 
+    @staticmethod
+    def _stem(word: str) -> str:
+        """Грубая основа слова: убирает типичное окончание и лишний хвост.
+
+        Нужна, чтобы «бёдрышки» находили «бёдрышек», а «в мёде» — «мёдом».
+        Слово уже должно быть приведено к нижнему регистру (см. _search_text).
+        """
+        if len(word) > 3 and word[-1] in "аеёиоуыэюяй":
+            word = word[:-1]
+        return word if len(word) <= 5 else word[:5]
+
+    def _matches_stem(self, token: str, stem: str) -> bool:
+        """Слово подходит основе, если начинается с неё и хвост не слишком длинный."""
+        return token.startswith(stem) and len(token) - len(stem) <= max(4, len(stem))
+
+    @staticmethod
+    def _contains_variants(stem: str) -> List[str]:
+        """Варианты основы для $contains: регистр и «е»/«ё».
+
+        В книгах пишут и «бёдрышки», и «бедрышки», поэтому проверяем обе буквы.
+        """
+        forms = {stem}
+        positions = [index for index, char in enumerate(stem) if char == "е"]
+        for index in positions:
+            forms.add(stem[:index] + "ё" + stem[index + 1:])
+        if 1 < len(positions) <= 4:
+            forms.add(stem.replace("е", "ё"))
+        variants = set()
+        for form in forms:
+            variants.update({form, form.capitalize(), form.upper()})
+        return sorted(variants)
+
     def search_similar(self, query: str, n_results: int = 5) -> List[Dict[str, Any]]:
-        """Совмещает точные совпадения и векторный поиск без загрузки всей базы."""
+        """Гибридный поиск: слова запроса + векторная близость.
+
+        Слова ищутся по основам (учитываются падежи и формы), поэтому редкое
+        слово из вопроса поднимает нужный фрагмент, даже если векторная модель
+        ошиблась. Списки ранжируются и объединяются по Reciprocal Rank Fusion.
+        """
         normalized = self._search_text(query)
         if not normalized or n_results <= 0:
             return []
         count = self.collection.count()
         if not count:
             return []
-        words = set(normalized.split()) - {
-            "как", "что", "это", "такое", "для", "или", "мне", "про", "расскажи",
-            "приготовить", "рецепт", "пожалуйста", "какие", "есть", "найди"
+
+        words = {
+            word for word in normalized.split()
+            if len(word) > 2 and word not in self.STOPWORDS
         }
-        words = {word for word in words if len(word) > 2}
-        # Точные совпадения ищем индексом Chroma, а не сканированием всей базы:
-        # это быстро и сохраняет приоритет точных совпадений над похожестью.
-        exact = self._contains_matches(words, normalized, n_results) if self.lexical else []
+
         embedding = self.embedding_model.encode([query], show_progress_bar=False)
-        found = self.collection.query(query_embeddings=embedding.tolist(), n_results=min(count, max(12, n_results)))
+        vector = embedding.tolist()
+        candidates = self._lexical_candidates(words) if self.lexical else {}
+
+        found = self.collection.query(
+            query_embeddings=vector,
+            n_results=min(count, max(12, n_results)),
+        )
         semantic = [
             {'id': ident, 'document': doc, 'metadata': meta or {}, 'distance': distance}
             for ident, doc, meta, distance in zip(found['ids'][0], found['documents'][0],
                                                   found['metadatas'][0], found['distances'][0])
         ]
-        # Точные совпадения не должны вытесняться похожими по смыслу документами.
-        results = []
-        seen = set()
-        for result in exact + semantic:
-            if result['id'] not in seen:
-                results.append(result)
-                seen.add(result['id'])
-            if len(results) == n_results:
-                break
-        return results
 
-    def _contains_matches(self, words, normalized, n_results):
-        """Точные совпадения через where_document (инвертированный индекс Chroma).
+        # Фрагмент, поднявшийся высоко в обоих списках, обгоняет того, кто
+        # оказался высоко только в одном. У словесного списка приоритет выше:
+        # векторная модель слабее на русских формулировках. Берём только верх
+        # словесного списка, иначе слабые частые слова перевешивают точные.
+        lexical = self._rank_lexical(candidates, normalized)[:max(10, n_results * 5)]
+        scores: Dict[str, float] = {}
+        items: Dict[str, Dict[str, Any]] = {}
+        for list_weight, ranked in ((1.0, lexical), (0.6, semantic)):
+            for rank, item in enumerate(ranked, 1):
+                ident = item['id']
+                items.setdefault(ident, item)
+                scores[ident] = scores.get(ident, 0.0) + list_weight / (60 + rank)
 
-        Найденные кандидаты ранжируются так же, как при полном сканировании:
-        сначала целая фраза, затем доля совпавших слов и их частота.
+        order = sorted(scores, key=lambda ident: scores[ident], reverse=True)
+        return [items[ident] for ident in order[:n_results]]
+
+    def _lexical_candidates(self, words, limit: int = 1000) -> Dict[str, Dict[str, Any]]:
+        """Кандидаты, содержащие слова запроса (индекс Chroma), с оценкой редкости.
+
+        Слова ищутся по основам и без ограничения на порядок выдачи, поэтому
+        редкая книга не теряется среди тысяч частых совпадений.
         """
-        if not words:
-            return []
-        variants = set()
+        candidates: Dict[str, Dict[str, Any]] = {}
+        texts: Dict[str, str] = {}
         for word in words:
-            variants.update({word, word.capitalize(), word.upper()})
-        clauses = [{"$contains": variant} for variant in sorted(variants) if variant]
-        where = {"$or": clauses} if len(clauses) > 1 else clauses[0]
-        try:
-            batch = self.collection.get(
-                where_document=where,
-                limit=max(200, n_results * 20),
-                include=["documents", "metadatas"],
-            )
-        except Exception:
-            # Старые версии Chroma могут не поддерживать $contains.
-            return []
-        lexical = []
-        serial = 0
-        for ident, doc, meta in zip(batch['ids'], batch['documents'], batch['metadatas']):
-            text = self._search_text(doc)
-            tokens = set(text.split())
-            hits = len(words & tokens)
-            phrase = normalized in text
-            if not phrase and hits != len(words):
+            stem = self._stem(word)
+            if len(stem) < 3:
                 continue
-            score = (int(phrase), hits / len(words), sum(text.count(word) for word in words))
-            result = {'id': ident, 'document': doc, 'metadata': meta or {}, 'distance': None}
-            heapq.heappush(lexical, (score, serial, result))
-            serial += 1
-            if len(lexical) > n_results:
-                heapq.heappop(lexical)
-        return [item[2] for item in sorted(lexical, reverse=True)]
+            variants = self._contains_variants(stem)
+            where = (
+                {"$or": [{"$contains": variant} for variant in variants]}
+                if len(variants) > 1 else {"$contains": variants[0]}
+            )
+            try:
+                batch = self.collection.get(
+                    where_document=where, limit=limit,
+                    include=["documents", "metadatas"],
+                )
+            except Exception:
+                # Старые версии Chroma могут не поддерживать $contains.
+                continue
+            ids = batch['ids']
+            if not ids:
+                continue
+            # Чем в меньшем числе фрагментов встречается слово, тем оно важнее.
+            weight = 1.0 / len(ids)
+            for ident, doc, meta in zip(ids, batch['documents'], batch['metadatas']):
+                text = texts.get(ident)
+                if text is None:
+                    text = self._search_text(doc)
+                    texts[ident] = text
+                occurrences = sum(
+                    1 for token in text.split() if self._matches_stem(token, stem)
+                )
+                if not occurrences:
+                    continue
+                entry = candidates.get(ident)
+                if entry is None:
+                    entry = {'id': ident, 'document': doc, 'metadata': meta or {},
+                             'distance': None, 'matched': 0, 'weight': 0.0, 'count': 0}
+                    candidates[ident] = entry
+                entry['matched'] += 1
+                entry['weight'] += weight
+                entry['count'] += occurrences
+        return candidates
+
+    def _rank_lexical(self, candidates, normalized: str) -> List[Dict[str, Any]]:
+        """Сортирует словесных кандидатов: фраза, редкость слов, число попаданий."""
+        items = list(candidates.values())
+        for item in items:
+            item['phrase'] = normalized in self._search_text(item['document'])
+        items.sort(
+            key=lambda item: (item['phrase'], item['weight'], item['matched'], item['count']),
+            reverse=True,
+        )
+        return items
 
     def expand_context(self, results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Добавляет по одному соседнему фрагменту с каждой стороны."""

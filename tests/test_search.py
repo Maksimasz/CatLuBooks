@@ -35,6 +35,7 @@ class SearchTests(unittest.TestCase):
             }
 
         self.db.collection.get.side_effect = get
+        # «Неверный» векторный результат: нужный фрагмент ищем словами запроса.
         self.db.collection.query.return_value = {
             'ids': [['other_chunk_0']],
             'documents': [['Чай и кофе']],
@@ -74,6 +75,22 @@ class SearchTests(unittest.TestCase):
         self.db.search_similar('минестроне', 2)
         kwargs = self.db.collection.get.call_args.kwargs
         self.assertIn('where_document', kwargs)
+
+    def test_stem_collapses_russian_endings(self):
+        for word, expected in [
+            ('бедрышки', 'бедры'), ('аджике', 'аджик'),
+            ('меде', 'мед'), ('плов', 'плов'), ('чай', 'чай'),
+        ]:
+            with self.subTest(word=word):
+                self.assertEqual(self.db._stem(word), expected)
+
+    def test_word_form_match_finds_other_case(self):
+        # В запросе «бёдрышки», в тексте — «бёдрышек»: основа должна совпасть.
+        self.docs.append(('drum_chunk_1', 'Маринад для бёдрышек с аджикой и мёдом',
+                          {'source': 'drum', 'chunk_id': 1, 'page': 5}))
+        self.db.collection.count.return_value = len(self.docs)
+        result = self.db.search_similar('бёдрышки', 1)
+        self.assertEqual(result[0]['id'], 'drum_chunk_1')
 
 
 class StoreFormattingTests(unittest.TestCase):
