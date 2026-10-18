@@ -217,7 +217,7 @@ function addSources(wrap, sources) {
   const box = el("div", "sources");
   box.appendChild(el("div", "sources-title", "Источники:"));
   for (const s of sources) {
-    const page = s.page != null ? `, стр. ${s.page}` : "";
+    const page = s.page != null ? `, ${s.unit || "стр."} ${s.page}` : "";
     box.appendChild(el("div", "source", `${s.source}${page}`));
   }
   wrap.appendChild(box);

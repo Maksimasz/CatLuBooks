@@ -8,7 +8,7 @@ import os
 import sys
 from dataclasses import dataclass, field, fields
 from pathlib import Path
-from typing import Any, Dict, Type, TypeVar
+from typing import Any, Dict, List, Type, TypeVar
 
 import yaml
 
@@ -46,6 +46,10 @@ class StoreConfig:
     research_folder: str = "./research"
     chunk_size: int = 1000
     chunk_overlap: int = 200
+    # Что читаем из папки с книгами.
+    formats: List[str] = field(default_factory=lambda: [".pdf", ".epub", ".txt", ".md", ".fb2"])
+    # auto — страницы без текста распознаются (нужен tesseract), off — нет.
+    ocr: str = "auto"
 
 
 @dataclass

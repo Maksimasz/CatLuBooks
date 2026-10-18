@@ -104,7 +104,8 @@ class RankingTests(unittest.TestCase):
             'СУПЫ Борщ .......... 27 Гаспачо .......... 30 Суп ......... 31'))
         self.assertTrue(self.db._is_noise(
             '177. Борщ с капустой 178. Борщ с черносливом 179. Борщ московский '
-            '180. Борщ флотский 181. Борщ с фасолью'))
+            '180. Борщ флотский 181. Борщ с фасолью 182. Борщ с грибами '
+            '183. Борщ украинский 184. Борщ сибирский'))
         self.assertTrue(self.db._is_noise(
             'Свекла 82 275 Свинина 151 202 205 240 Сельдерей 162 163 Сливки 37 178 '
             '180 238 Сметана 53 56 Соевый 16 17 Сумах 110 131 Сыр 177 180 Грибы '
@@ -165,7 +166,7 @@ class StoreFormattingTests(unittest.TestCase):
         }]
         text = store.format_context(results)
         self.assertIn('800 мл воды', text)
-        self.assertIn('book.pdf, страница PDF 22', text)
+        self.assertIn('book.pdf, страница 22', text)
 
     def test_format_context_respects_length_limit(self):
         store = self.make_store()

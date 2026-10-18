@@ -24,6 +24,8 @@ class VectorStore:
             embedding_model=cfg.embeddings.model,
             chunk_size=cfg.store.chunk_size,
             chunk_overlap=cfg.store.chunk_overlap,
+            formats=cfg.store.formats,
+            ocr=cfg.store.ocr,
         )
         self._db.lexical = cfg.search.lexical
 
@@ -48,7 +50,7 @@ class VectorStore:
             source = meta.get("source", "Неизвестный источник")
             page = meta.get("page")
             if page is not None:
-                source += f", страница PDF {page}"
+                source += f", {meta.get('unit') or 'страница'} {page}"
             piece = f"Источник {i} ({source}):\n{result.get('document', '')}"
             gap = 2 if parts else 0
             room = budget - used - gap
@@ -78,6 +80,7 @@ class VectorStore:
                 "index": i,
                 "source": source,
                 "page": page,
+                "unit": meta.get("unit") or "стр.",
                 "snippet": (result.get("document") or "")[:200],
             })
         return out

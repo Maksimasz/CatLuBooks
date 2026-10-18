@@ -12,9 +12,10 @@ from typing import List, Dict, Any, Optional
 from pathlib import Path
 import re
 
-import PyPDF2
 import chromadb
 from sentence_transformers import SentenceTransformer
+
+from core import parsers
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -25,6 +26,22 @@ logger = logging.getLogger(__name__)
 for _stream in (sys.stdout, sys.stderr):
     if hasattr(_stream, "reconfigure"):
         _stream.reconfigure(errors="replace")
+
+def _set_alarm(seconds: int):
+    """Ограничение времени на обработку файла (на Windows не поддерживается)."""
+    if os.name == "nt":
+        return
+    import signal
+
+    if seconds:
+        def timeout_handler(signum, frame):
+            raise TimeoutError("Превышен лимит времени обработки файла")
+
+        signal.signal(signal.SIGALRM, timeout_handler)
+        signal.alarm(seconds)
+    else:
+        signal.alarm(0)
+
 
 class RAGDatabase:
     # Значения по умолчанию на уровне класса: их видят и экземпляры,
@@ -46,7 +63,9 @@ class RAGDatabase:
                  collection_name: str = "research_papers",
                  embedding_model: str = "paraphrase-multilingual-MiniLM-L12-v2",
                  chunk_size: int = 1000,
-                 chunk_overlap: int = 200):
+                 chunk_overlap: int = 200,
+                 formats: Optional[List[str]] = None,
+                 ocr: str = "auto"):
         """
         Инициализация RAG базы данных
         
@@ -56,12 +75,19 @@ class RAGDatabase:
             embedding_model: Модель для создания эмбеддингов
             chunk_size: Размер фрагмента в символах
             chunk_overlap: Перекрытие между фрагментами в символах
+            formats: Расширения файлов, которые индексируются
+            ocr: "auto" — распознавать страницы без текста (нужен tesseract),
+                 "off" — не распознавать
         """
         self.db_path = db_path
         self.collection_name = collection_name
         self.embedding_model_name = embedding_model
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
+        self.formats = [suffix.lower() for suffix in (formats or parsers.SUPPORTED)]
+        self.tesseract = None if ocr == "off" else parsers.Tesseract()
+        if self.tesseract is not None and not self.tesseract.available:
+            self.tesseract = None
         
         # Инициализация ChromaDB
         self.client = chromadb.PersistentClient(path=db_path)
@@ -82,41 +108,21 @@ class RAGDatabase:
             )
             print(f"✅ Создана новая коллекция: {collection_name}")
     
-    def iter_pdf_pages(self, pdf_path: str):
-        """Извлекает по одной странице; ошибки прерывают импорт."""
-        with open(pdf_path, 'rb') as file:
-            reader = PyPDF2.PdfReader(file)
-            # shortcut: PyPDF2 кеширует объекты PDF; особо тяжёлые страницы
-            # требуют отдельного процесса с ограничением памяти.
-            for page_num, page in enumerate(reader.pages, 1):
-                text = page.extract_text()
-                if text and text.strip():
-                    yield page_num, f"--- Страница {page_num} ---\n{text}"
+    def iter_sections(self, file_path: str):
+        """Текст документа по частям: страница PDF, глава EPUB, часть TXT.
 
-    def extract_text_from_pdf(self, pdf_path: str) -> str:
-        """Возвращает весь текст для внешних вызовов; импорт использует итератор."""
-        return "\n".join(text for _, text in self.iter_pdf_pages(pdf_path))
+        Ошибка чтения прерывает импорт: лучше остановиться, чем молча
+        записать в базу половину книги.
+        """
+        yield from parsers.read_sections(file_path, self.tesseract)
+
+    def extract_text(self, file_path: str) -> str:
+        """Весь текст файла одной строкой (для внешних вызовов)."""
+        return "\n".join(text for _, text in self.iter_sections(file_path))
 
     def clean_text(self, text: str) -> str:
-        """
-        Очищает и нормализует текст
-        
-        Args:
-            text: Исходный текст
-            
-        Returns:
-            Очищенный текст
-        """
-        # Удаляем лишние пробелы и переносы строк
-        text = re.sub(r'\s+', ' ', text)
-        
-        # Удаляем специальные символы, но сохраняем пунктуацию
-        text = re.sub(r'[^\w\s\.\,\!\?\;\:\-\(\)\[\]\"\'\/\%\=\+\*\&\#\@]', ' ', text)
-        
-        # Удаляем множественные пробелы
-        text = re.sub(r'\s+', ' ', text)
-        
-        return text.strip()
+        """Очищает и нормализует текст (колонтитулы, переносы, мусор)."""
+        return parsers.clean_text(text)
     
     def iter_text_chunks(self, text: str, chunk_size: int = 1000, overlap: int = 200):
         """Выдаёт фрагменты без накопления списка и всегда движется вперёд."""
@@ -140,14 +146,16 @@ class RAGDatabase:
         """Совместимый интерфейс для получения списка фрагментов."""
         return list(self.iter_text_chunks(text, chunk_size, overlap))
 
-    def add_pdf_to_database(self, pdf_path: str, metadata: Optional[Dict[str, Any]] = None):
-        """Читает страницы и сразу сохраняет порции по 32 фрагмента.
+    def add_file_to_database(self, file_path: str, metadata: Optional[Dict[str, Any]] = None):
+        """Читает файл (PDF/EPUB/TXT/FB2) и сразу сохраняет порции по 32 фрагмента.
 
         При ошибке импорт прерывается; уже записанные порции остаются в базе.
         """
-        print(f"📄 Обрабатываю PDF: {pdf_path}")
-        pdf_name = Path(pdf_path).name
-        file_size = Path(pdf_path).stat().st_size
+        path = Path(file_path)
+        print(f"📄 Обрабатываю файл: {path.name}")
+        source = path.name
+        unit = parsers.unit_for(path)
+        file_size = path.stat().st_size
         chunks = []
         metadatas = []
         saved = 0
@@ -161,39 +169,41 @@ class RAGDatabase:
                 embeddings=embeddings.tolist(),
                 documents=chunks,
                 metadatas=metadatas,
-                ids=[f"{pdf_name}_chunk_{i}" for i in range(saved, saved + len(chunks))]
+                ids=[f"{source}_chunk_{i}" for i in range(saved, saved + len(chunks))]
             )
             saved += len(chunks)
             print(f"  💾 Сохранено фрагментов: {saved}", flush=True)
             chunks.clear()
             metadatas.clear()
 
-        for page_num, page_text in self.iter_pdf_pages(pdf_path):
-            for chunk in self.iter_text_chunks(
-                self.clean_text(page_text), self.chunk_size, self.chunk_overlap
-            ):
-                if len(chunk) <= 50:
-                    continue
+        for number, section in self.iter_sections(str(path)):
+            text = self.clean_text(section)
+            if not parsers.keep_section(text):
+                continue  # пустая страница, обложка, оглавление или указатель
+            for chunk in self.iter_text_chunks(text, self.chunk_size, self.chunk_overlap):
+                if len(chunk) <= 50 or parsers.is_listing(chunk):
+                    continue  # служебный текст в базу не пишем
                 chunks.append(chunk)
                 metadatas.append({
                     **(metadata or {}),
-                    "source": pdf_name,
+                    "source": source,
                     "chunk_id": saved + len(chunks) - 1,
                     "chunk_length": len(chunk),
-                    "page": page_num,
-                    "file_size": file_size,  # Размер PDF в байтах.
+                    "page": number,
+                    "unit": unit,
+                    "file_size": file_size,  # Размер файла в байтах.
                 })
                 if len(chunks) == 32:
                     save_batch()
         if chunks:
             save_batch()
         if not saved:
-            raise ValueError(f"В PDF {pdf_name} не найден текст для индексации")
+            raise ValueError(f"В файле {source} не найден текст для индексации")
         # При повторном импорте более короткого документа удаляем старый хвост.
         self.collection.delete(where={"$and": [
-            {"source": pdf_name}, {"chunk_id": {"$gte": saved}}
+            {"source": source}, {"chunk_id": {"$gte": saved}}
         ]})
-        print(f"✅ PDF {pdf_name} добавлен: {saved} фрагментов")
+        print(f"✅ {source} добавлен: {saved} фрагментов")
 
     @staticmethod
     def _resolve_folder(folder: str) -> Path:
@@ -207,69 +217,60 @@ class RAGDatabase:
                 return child
         return path
 
-    def process_research_folder(self, research_folder: str = "./Research"):
-        """
-        Обрабатывает все PDF файлы в папке исследований
-        
+    def process_research_folder(self, research_folder: str = "./research"):
+        """Индексирует все поддерживаемые файлы в папке (и в подпапках).
+
         Args:
-            research_folder: Путь к папке с PDF файлами
+            research_folder: Путь к папке с книгами (PDF, EPUB, TXT, FB2)
         """
         research_path = self._resolve_folder(research_folder)
         if not research_path.exists():
             print(f"❌ Папка {research_folder} не найдена")
-            return
-        
-        pdf_files = list(research_path.glob("*.pdf"))
-        if not pdf_files:
-            print(f"❌ PDF файлы не найдены в {research_folder}")
-            return
-        
-        print(f"🔍 Найдено PDF файлов: {len(pdf_files)}")
-        
+            return False
+
+        files = [path for path in sorted(research_path.rglob("*"))
+                 if path.is_file() and path.suffix.lower() in self.formats]
+        skipped = [path for path in sorted(research_path.rglob("*"))
+                   if path.is_file() and path.suffix.lower() not in self.formats]
+        if not files:
+            print(f"❌ Книги не найдены в {research_folder} "
+                  f"(поддерживаются: {', '.join(self.formats)})")
+            return False
+
+        print(f"🔍 Найдено файлов: {len(files)} "
+              f"({', '.join(sorted({p.suffix.lower() for p in files}))})")
+        if skipped:
+            print(f"⏭️ Пропускаю файлы, формат которых не читаю: "
+                  f"{len(skipped)} ({', '.join(sorted({p.suffix.lower() for p in skipped}))})")
+        if self.tesseract is not None:
+            print("🔎 Страницы без текста будут распознаны через tesseract "
+                  "(это самая долгая часть)")
+
         successful_files = 0
         failed_files = []
-        
-        # Сигналы таймаута доступны только на UNIX-системах (Linux / macOS)
-        has_signal_alarm = hasattr(os, 'name') and os.name != 'nt'
-        if has_signal_alarm:
-            import signal
 
-            def timeout_handler(signum, frame):
-                raise TimeoutError("Превышен лимит времени обработки файла")
+        for i, file_path in enumerate(files, 1):
+            print(f"\n📋 Обрабатываю файл {i}/{len(files)}: {file_path.name}")
 
-        for i, pdf_file in enumerate(pdf_files, 1):
-            print(f"\n📋 Обрабатываю файл {i}/{len(pdf_files)}: {pdf_file.name}")
-            
             try:
-                if has_signal_alarm:
-                    import signal
-                    signal.signal(signal.SIGALRM, timeout_handler)
-                    signal.alarm(300)  # 5 минут
-                
-                self.add_pdf_to_database(str(pdf_file))
-                
-                if has_signal_alarm:
-                    import signal
-                    signal.alarm(0)
+                _set_alarm(300)  # ограничение времени на файл, только для UNIX
+                self.add_file_to_database(str(file_path))
+                _set_alarm(0)
                 successful_files += 1
-                
+
             except TimeoutError:
-                print(f"⏰ Превышен лимит времени для {pdf_file.name}")
-                failed_files.append((pdf_file.name, "Таймаут"))
-                if has_signal_alarm:
-                    import signal
-                    signal.alarm(0)
-                
+                print(f"⏰ Превышен лимит времени для {file_path.name}")
+                failed_files.append((file_path.name, "Таймаут"))
+                _set_alarm(0)
+
             except Exception as e:
-                print(f"❌ Ошибка обработки {pdf_file.name}: {e}")
-                failed_files.append((pdf_file.name, str(e)))
-                if has_signal_alarm:
-                    import signal
-                    signal.alarm(0)
-        
+                print(f"❌ Ошибка обработки {file_path.name}: {e}")
+                failed_files.append((file_path.name, str(e)))
+                _set_alarm(0)
+
         # Итоговая статистика
         print(f"\n🎉 Обработка завершена!")
-        print(f"✅ Успешно обработано файлов: {successful_files}/{len(pdf_files)}")
+        print(f"✅ Успешно обработано файлов: {successful_files}/{len(files)}")
         
         if failed_files:
             print(f"❌ Не удалось обработать {len(failed_files)} файлов:")
@@ -447,28 +448,14 @@ class RAGDatabase:
 
     @staticmethod
     def _is_noise(text: str) -> bool:
-        """Оглавление, предметный указатель, маркер страницы или OCR-мусор.
+        """Оглавление, указатель, мусор распознавания — не ответ на вопрос.
 
         Такие фрагменты не содержат рецепта, но могут много раз повторять
-        название блюда — и по старой логике обгоняли сам рецепт.
+        название блюда и обгонять сам рецепт. Поэтому они понижаются при
+        поиске, а при индексации такие страницы и вовсе не пишутся в базу
+        (см. parsers.keep_section, parsers.is_listing).
         """
-        if len(re.findall(r"\.{4,}", text)) >= 3:
-            return True  # строка оглавления: «Борщ ......... 27»
-        if len(re.findall(r"\b\d{2,4}\.\s*[А-ЯЁ]", text)) >= 5:
-            return True  # предметный указатель: «177. Борщ с картофелем 178. Борщ»
-        if len(re.findall(r"/g\d+", text)) >= 10:
-            return True  # сломанная распознавалка: «/g299/g301/g297»
-        tokens = re.findall(r"\w+", text)
-        if len(tokens) >= 30:
-            numbers = sum(1 for token in tokens if token.isdigit())
-            if numbers / len(tokens) >= 0.35:
-                return True  # алфавитный указатель: «Свекла 82 275 Свинина 151»
-        stripped = text.strip()
-        return bool(
-            len(stripped) < 200
-            and re.match(r"^[-—–\s]*(Страница|Фото|Содержание|Оглавление)\b",
-                         stripped, re.IGNORECASE)
-        )
+        return parsers.is_noise(text)
 
     def expand_context(self, results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Добавляет по одному соседнему фрагменту с каждой стороны."""
@@ -520,23 +507,31 @@ class RAGDatabase:
 
 
 def main():
-    """Главная функция для создания базы данных"""
+    """Пересобирает базу из папки с книгами (см. config.yaml)."""
     print("🚀 Создание векторной базы данных для RAG системы")
     print("=" * 60)
-    
-    # Создаем экземпляр базы данных
-    rag_db = RAGDatabase()
-    
-    # Обрабатываем папку исследований
-    rag_db.process_research_folder("./Research")
-    
+
+    from config import load_config
+
+    cfg = load_config()
+    rag_db = RAGDatabase(
+        db_path=cfg.store.db_path,
+        collection_name=cfg.store.collection,
+        embedding_model=cfg.embeddings.model,
+        chunk_size=cfg.store.chunk_size,
+        chunk_overlap=cfg.store.chunk_overlap,
+        formats=cfg.store.formats,
+        ocr=cfg.store.ocr,
+    )
+    rag_db.process_research_folder(cfg.store.research_folder)
+
     # Показываем статистику
     stats = rag_db.get_database_stats()
     print("\n📊 Статистика базы данных:")
     print(f"Всего чанков: {stats['total_chunks']}")
     print(f"Источников: {stats['sources_count']}")
     print(f"Файлы: {', '.join(stats['sources'])}")
-    
+
     # Тестовый поиск
     print("\n🔍 Тестовый поиск...")
     test_query = "machine learning"
