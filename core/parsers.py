@@ -29,8 +29,8 @@ UNITS = {".pdf": "страница", ".epub": "раздел", ".txt": "част�
          ".md": "часть", ".fb2": "часть"}
 
 # --- Признаки служебного текста -------------------------------------------
-DOTS_LEADER = re.compile(r"\.{4,}")                       # «Борщ ......... 27»
-NUMBERED_INDEX = re.compile(r"\b\d{2,4}\.\s*[А-ЯЁ]")      # «177. Борщ с картофелем»
+LEADER_DOTS = re.compile(r"(?:\.\s*){4,}")                # «Борщ ......... 27» и «Борщ . . . 27»
+NUMBERED_INDEX = re.compile(r"\b\d{2,4}\.?\s*[А-ЯЁ]")     # «177. Борщ», «Клафути 118 Авокадо»
 GLYPH_GARBAGE = re.compile(r"/g\d+")                      # сломанный шрифт PDF
 PAGE_MARKER = re.compile(r"^[-—–\s]*(Страница|Фото|Содержание|Оглавление)\b",
                          re.IGNORECASE)
@@ -41,11 +41,21 @@ ANY_LETTER_WORD = re.compile(r"[A-Za-zА-Яа-яЁё]{2,}")
 LATIN_WORD = re.compile(r"^[A-Za-z]{2,}$")
 CYRILLIC_ANY = re.compile(r"[А-Яа-яЁё]")
 WORD = re.compile(r"\w+")
+CAPITAL_WORD = re.compile(r"^[А-ЯЁ]")
+SENTENCE_PUNCT = re.compile(r"[.,;:!?]")
+# Глаголы, которыми пишут рецепты: «нарезать лук», «обжарить до золотистого».
+COOKING_VERB = re.compile(
+    r"^(нарез|обжар|вари|добав|смеш|запек|полож|влей|посол|туш|жар|подготов|"
+    r"довед|разогр|вылож|сним|очист|раздел|соедин|залив)")
 
 MIN_WORDS = 20        # меньше слов — страница пустая (обложка, пустой скан)
 DIGIT_SHARE = 0.35    # доля чисел, при которой текст похож на алфавитный указатель
 LISTING_DIGIT_SHARE = 0.15   # порог доли чисел для «177. Борщ … 178. Борщ»
-NUMBERED_MIN = 8      # столько записей «177. Борщ» подряд — это указатель, не рецепт
+NUMBERED_MIN = 12     # столько записей «117. Борщ» или «Клафути 118» — это указатель
+TITLE_MIN_WORDS = 40  # короче список названий не отличить от рецепта
+TITLE_CAPITAL_SHARE = 0.28   # столько слов с большой буквы в списке названий блюд
+TITLE_PUNCT_LIMIT = 0.10     # так мало запятых и точек в списке названий
+TITLE_MAX_VERBS = 2   # в рецепте глаголов приготовления намного больше
 OCR_LANGUAGE = "rus+eng"
 OCR_DPI = 200
 WINDOWS_TESSERACT = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
@@ -79,11 +89,46 @@ def _digit_share(text: str) -> Tuple[float, int]:
     return share, len(tokens)
 
 
+def has_leader_dots(text: str) -> bool:
+    """Точки-заполнители, как в оглавлении: «Борщ ......... 27»."""
+    return len(LEADER_DOTS.findall(text)) >= 3
+
+
+def has_broken_glyphs(text: str) -> bool:
+    """Мусор распознавания: «/g299/g301/g297» вместо букв."""
+    return len(GLYPH_GARBAGE.findall(text)) >= 10
+
+
+def is_title_list(text: str) -> bool:
+    """Оглавление без номеров страниц: «Хоровац Гриль салат Террин …».
+
+    Список названий блюд отличается от рецепта тремя признаками сразу: почти
+    нет запятых и точек (0.005 против 0.15 на слово), слов с большой буквы
+    много (0.31 против 0.11) и нет глаголов приготовления; строчки ингредиентов
+    («мука 200 г») остаются в базе, потому что пишутся со строчной буквы.
+    Таблицы калорийности сюда тоже попадают, но там нет названий блюд и они
+    не нужны при поиске рецепта.
+    """
+    words = ANY_LETTER_WORD.findall(text)
+    if len(words) < TITLE_MIN_WORDS:
+        return False
+    if len(SENTENCE_PUNCT.findall(text)) / len(words) >= TITLE_PUNCT_LIMIT:
+        return False
+    capital = sum(1 for word in words if CAPITAL_WORD.match(word))
+    if capital / len(words) < TITLE_CAPITAL_SHARE:
+        return False
+    return sum(1 for word in words if COOKING_VERB.match(word)) <= TITLE_MAX_VERBS
+
+
 def is_listing(text: str) -> bool:
-    """Оглавление, указатель или мусор распознавания, но не текст рецепта."""
-    if len(DOTS_LEADER.findall(text)) >= 3:
-        return True
-    if len(GLYPH_GARBAGE.findall(text)) >= 10:
+    """Оглавление, указатель или мусор распознавания, но не текст рецепта.
+
+    Записи указателя узнаются по паре «блюдо + номер страницы»: «177. Борщ с
+    картофелем», «Клафути 118 Авокадо». В рецепте чисел много, но единицы
+    измерения рядом («варить 20 минут», «249/200 г»), поэтому доля чисел
+    проверяется отдельно — иначе пострадали бы технологические карты.
+    """
+    if has_leader_dots(text) or has_broken_glyphs(text) or is_title_list(text):
         return True
     share, _ = _digit_share(text)
     return len(NUMBERED_INDEX.findall(text)) >= NUMBERED_MIN and share >= LISTING_DIGIT_SHARE

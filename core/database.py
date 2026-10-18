@@ -181,8 +181,12 @@ class RAGDatabase:
             if not parsers.keep_section(text):
                 continue  # пустая страница, обложка, оглавление или указатель
             for chunk in self.iter_text_chunks(text, self.chunk_size, self.chunk_overlap):
-                if len(chunk) <= 50 or parsers.is_listing(chunk):
-                    continue  # служебный текст в базу не пишем
+                # Обрывки оглавления и мусор распознавания в базу не пишем.
+                # Явные признаки проверяем и здесь: страница может быть
+                # смешанной, тогда на фрагменты она не отсеется целиком.
+                if len(chunk) <= 50 or parsers.has_leader_dots(chunk) \
+                        or parsers.has_broken_glyphs(chunk):
+                    continue
                 chunks.append(chunk)
                 metadatas.append({
                     **(metadata or {}),
@@ -370,14 +374,17 @@ class RAGDatabase:
         order = sorted(scores, key=lambda ident: scores[ident], reverse=True)
         return [items[ident] for ident in order[:n_results]]
 
-    def _lexical_candidates(self, words, limit: int = 1000) -> Dict[str, Dict[str, Any]]:
+    def _lexical_candidates(self, words, limit: Optional[int] = None) -> Dict[str, Dict[str, Any]]:
         """Кандидаты, содержащие слова запроса (индекс Chroma), с оценкой редкости.
 
         Слова ищутся по основам и без ограничения на порядок выдачи, поэтому
-        редкая книга не теряется среди тысяч частых совпадений.
+        редкая книга не теряется среди тысяч частых совпадений. Выборка не
+        обрезается: обрезанная, она искажает вес слова (чем реже слово, тем
+        оно важнее), а сама проверка всё равно просматривает всю базу.
         """
         candidates: Dict[str, Dict[str, Any]] = {}
         texts: Dict[str, str] = {}
+        limit = limit or max(1000, self.collection.count())
         for word in words:
             stem = self._stem(word)
             if len(stem) < 3:

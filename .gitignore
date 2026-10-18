@@ -129,7 +129,7 @@ dmypy.json
 .pyre/
 
 # ChromaDB data
-chroma_db/
+chroma_db*/
 
 # Ключи API (хранятся только локально)
 secrets.json
