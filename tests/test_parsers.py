@@ -89,6 +89,15 @@ class NoiseTests(unittest.TestCase):
     def test_recipe_table_is_kept(self):
         self.assertTrue(parsers.keep_section(self.TECH_CARD))
 
+    def test_recipe_table_is_not_noise(self):
+        """Техкарта — не служебный текст: её числа это граммовки, а не страницы.
+
+        Пока таблица считалась «числовой», при поиске она уезжала в конец
+        выдачи, и модель отвечала «в таблицах граммовок нет».
+        """
+        self.assertTrue(parsers.digits_heavy(self.TECH_CARD))
+        self.assertFalse(parsers.is_noise(self.TECH_CARD))
+
     def test_title_list_without_numbers_is_listing(self):
         """Оглавление без номеров страниц: «Хоровац Гриль салат Террин …»."""
         self.assertTrue(parsers.is_listing(

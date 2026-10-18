@@ -64,6 +64,29 @@ class SearchTests(unittest.TestCase):
         results = self.db.search_similar('минестроне', 2)
         self.assertEqual(len(self.db.expand_context(results)), 2)
 
+    def test_word_in_all_query_words_beats_partial_match(self):
+        """«Борщ московский»: техкарта (оба слова) важнее биографии шефа.
+
+        Биография совпала по слову «московский» и поднялась в векторном
+        списке, но точное совпадение по всем словам вопроса сильнее.
+        """
+        card = ('РЕЦЕПТУРА 179. БОРЩ МОСКОВСКИЙ Расход сырья на 1 порцию, г '
+                'Наименование сырья брутто нетто Свекла 60 48 Картофель 40 30')
+        self.docs.append(('card_chunk_0', card,
+                          {'source': 'cards', 'chunk_id': 0, 'page': 147}))
+        self.docs.append(('bio_chunk_0', 'Работал шеф-поваром московских ресторанов.',
+                          {'source': 'bio', 'chunk_id': 0, 'page': 5}))
+        self.db.collection.count.return_value = len(self.docs)
+        self.db.collection.query.return_value = {
+            'ids': [['bio_chunk_0', 'other_chunk_0']],
+            'documents': [['Работал шеф-поваром московских ресторанов.', 'Чай и кофе']],
+            'metadatas': [[{'source': 'bio', 'chunk_id': 0, 'page': 5},
+                           {'source': 'other', 'chunk_id': 0}]],
+            'distances': [[0.1, 0.2]],
+        }
+        result = self.db.search_similar('Московский борщ', 2)
+        self.assertEqual(result[0]['id'], 'card_chunk_0')
+
     def test_lexical_can_be_disabled(self):
         self.db.lexical = False
         self.db.collection.get.reset_mock()
@@ -136,6 +159,31 @@ class RankingTests(unittest.TestCase):
             },
         }
         ranked = self.db._rank_lexical(candidates, 'куриный суп лапша')
+        self.assertEqual(ranked[0]['id'], 'recipe')
+
+    def test_recipe_table_outranks_bio(self):
+        """«Борщ московский»: таблица с граммовками важнее биографии шефа.
+
+        Биография совпадает лишь по слову «московский», техкарта — по обоим
+        словам, но чисел в ней много, и раньше она считалась шумом.
+        """
+        recipe = ('РЕЦЕПТУРА 179. БОРЩ МОСКОВСКИЙ Расход сырья на 1 порцию, г '
+                  'Наименование сырья брутто нетто Свекла 60 48 Картофель 40 30 ' +
+                  '100 80 ' * 40)
+        bio = ('Вячеслав Купцов в разные годы работал шеф-поваром московских '
+               'ресторанов и готовил на московской кухне. ' * 4)
+        candidates = {
+            'recipe': {
+                'id': 'recipe', 'metadata': {}, 'distance': None, 'matched': 2,
+                'weight': 0.070, 'count': 2, 'document': recipe,
+            },
+            'bio': {
+                'id': 'bio', 'metadata': {}, 'distance': None, 'matched': 1,
+                'weight': 0.050, 'count': 4, 'document': bio,
+            },
+        }
+        ranked = self.db._rank_lexical(candidates, 'московский борщ')
+        self.assertFalse(self.db._is_noise(recipe))
         self.assertEqual(ranked[0]['id'], 'recipe')
 
     def test_short_precise_chunk_beats_long_one(self):

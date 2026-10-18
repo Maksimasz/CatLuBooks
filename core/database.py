@@ -21,6 +21,11 @@ from core import parsers
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Надбавка фрагменту, в котором совпали все слова вопроса. Больше любой суммы
+# мест RRF (места дают в лучшем случае 1/60 + 0,6/60), поэтому полное
+# совпадение слов всегда идёт впереди — см. search_similar.
+EXACT_MATCH_BONUS = 10.0
+
 # На консоли Windows (cp866/cp1251) печать эмодзи падает с UnicodeEncodeError
 # и прерывает работу. Заменяем непечатаемые символы вместо ошибки.
 for _stream in (sys.stdout, sys.stderr):
@@ -327,7 +332,8 @@ class RAGDatabase:
 
         Слова ищутся по основам (учитываются падежи и формы), поэтому редкое
         слово из вопроса поднимает нужный фрагмент, даже если векторная модель
-        ошиблась. Списки ранжируются и объединяются по Reciprocal Rank Fusion.
+        ошиблась. Списки объединяются по Reciprocal Rank Fusion, но фрагмент,
+        где совпали все слова вопроса, идёт впереди остальных.
         """
         normalized = self._search_text(query)
         if not normalized or n_results <= 0:
@@ -340,6 +346,9 @@ class RAGDatabase:
             word for word in normalized.split()
             if len(word) > 2 and word not in self.STOPWORDS
         }
+        # По словам ищутся только основы длиной от трёх букв (см.
+        # _lexical_candidates): столько слов может совпасть во фрагменте.
+        searched = [word for word in words if len(self._stem(word)) >= 3]
 
         embedding = self.embedding_model.encode([query], show_progress_bar=False)
         vector = embedding.tolist()
@@ -370,6 +379,16 @@ class RAGDatabase:
                 ident = item['id']
                 items.setdefault(ident, item)
                 scores[ident] = scores.get(ident, 0.0) + list_weight / (60 + rank)
+
+        # Совпадение по всем словам вопроса важнее любого одного списка: в
+        # техкарте есть и «борщ», и «московский», а в биографии шефа — только
+        # «московский». Бонус больше любой суммы мест в RRF, поэтому такие
+        # фрагменты всегда впереди; если совпадений по всем словам нет,
+        # порядок прежний.
+        if len(searched) > 1:
+            for ident, item in items.items():
+                if item.get('matched', 0) == len(searched):
+                    scores[ident] += EXACT_MATCH_BONUS
 
         order = sorted(scores, key=lambda ident: scores[ident], reverse=True)
         return [items[ident] for ident in order[:n_results]]

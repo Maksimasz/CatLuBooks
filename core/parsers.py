@@ -189,8 +189,19 @@ def looks_garbled(text: str) -> bool:
 
 
 def is_noise(text: str) -> bool:
-    """Служебный текст, который не может быть ответом: понижается при поиске."""
-    if is_listing(text) or digits_heavy(text) or looks_garbled(text):
+    """Служебный текст, который не может быть ответом: понижается при поиске.
+
+    Таблица рецептуры — не указатель, хотя чисел в ней не меньше. «Брутто»,
+    «нетто» и «Расход сырья» говорят, что числа здесь граммовки, и именно
+    такой фрагмент отвечает на вопрос «сколько класть». Поэтому признак
+    таблицы проверяется до счёта чисел: иначе рецептура с количествами уезжает
+    в конец выдачи и модель отвечает «граммовки в таблицах не указаны».
+    """
+    if is_listing(text):
+        return True
+    if has_recipe_table(text):
+        return False
+    if digits_heavy(text) or looks_garbled(text):
         return True
     stripped = text.strip()
     return bool(len(stripped) < 200 and PAGE_MARKER.match(stripped))
