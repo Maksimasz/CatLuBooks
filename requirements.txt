@@ -1,0 +1,21 @@
+# Зависимости для RAG YandexGPT ассистента через Ollama
+
+# Основные зависимости
+ollama>=0.3.0
+
+# RAG и векторная база данных
+chromadb>=0.4.0
+sentence-transformers>=2.2.0
+
+# Обработка PDF
+PyPDF2>=3.0.0
+
+# Веб-оболочка (FastAPI + статический чат/PWA)
+fastapi>=0.110
+uvicorn>=0.27
+httpx>=0.27
+PyYAML>=6.0
+
+# Дополнительные библиотеки
+numpy>=1.24.0
+tqdm>=4.65.0 
