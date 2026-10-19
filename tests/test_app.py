@@ -149,6 +149,13 @@ class ApiTests(unittest.TestCase):
         self.assertTrue(catalog["providers"])
         self.assertTrue(catalog["default"]["provider"])
 
+    def test_health_answers_for_outside_checkers(self):
+        """Адрес /health спрашивают сторонние инструменты — 404 им не нужен."""
+        response = self.client.get("/health")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["ok"])
+
     # --- OCR ----------------------------------------------------------
 
     def test_ocr_status_is_reported(self):

@@ -301,6 +301,16 @@ async def stats(agent: str | None = None):
     return data
 
 
+@app.get("/health")
+async def health():
+    """Ответ «сервер жив».
+
+    Адрес спрашивают сторонние инструменты (например, обозреватель, из
+    которого запускают сервер) — лучше ответить, чем оставлять 404 в журнале.
+    """
+    return {"ok": True}
+
+
 @app.get("/api/config")
 async def config():
     return {
