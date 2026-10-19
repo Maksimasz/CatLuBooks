@@ -81,13 +81,52 @@ CatLuBooks/
 
 ## Установка
 
-Нужен Python 3.10+.
+### Что понадобится
+
+| Что | Зачем | Где взять |
+|---|---|---|
+| Python 3.10+ | запускает сервер | <https://www.python.org/downloads/> |
+| Модель эмбеддингов | поиск по книгам (локально, в облако не уходит) | скачается сама при первом запуске — [paraphrase-multilingual-MiniLM-L12-v2](https://huggingface.co/sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2) |
+| Ollama и модель генерации | ответы на этом ПК, без облака | [ollama.com/download](https://ollama.com/download), модели — [поиск](https://ollama.com/search) |
+| Ключ облачного провайдера | если ответы делает облако | таблица «Провайдеры моделей» ниже |
+| Tesseract с русским языком | чтение сканов, если они есть | [установщик UB-Mannheim](https://github.com/UB-Mannheim/tesseract/wiki) |
+
+Интернет нужен один раз — скачать зависимости и модели. Дальше всё работает локально.
+
+### Шаги
 
 ```bash
+git clone https://github.com/Maksimasz/CatLuBooks.git
+cd CatLuBooks
 python -m venv .venv
-source .venv/bin/activate      # Windows: .\.venv\Scripts\activate
-pip install -r requirements.txt
+.\.venv\Scripts\activate          # Windows; Linux/macOS: source .venv/bin/activate
+pip install -r requirements.txt   # около гигабайта: torch и остальное
+ollama pull yandex/YandexGPT-5-Lite-8B-instruct-GGUF   # или другую модель из llm.model
+python app.py
 ```
+
+Откройте <http://localhost:8000> — дальше всё делается в интерфейсе (⚙).
+
+Что происходит при первом запуске:
+
+- скачивается модель эмбеддингов (~120 МБ) в кэш HuggingFace пользователя — это
+  единственный момент, когда поиску нужен интернет. Готовая папка кэша
+  (`%USERPROFILE%\.cache\huggingface`) переносится на другой ПК без сети;
+- если модели из `llm.model` на этом ПК нет, ответы генерироваться не будут:
+  выполните `ollama pull <модель>` (или выберите другую в ⚙ → Модели);
+- проверка, что всё на месте: `python -m unittest discover -s tests -t .` —
+  тесты автономные, ни моделей, ни Ollama не требуют.
+
+### Обновление и перенос данных
+
+```bash
+git pull        # затем перезапустите сервер: Ctrl+C и python app.py
+```
+
+На компьютере не хранится ничего, что нельзя перенести: данные — это папки
+`agents/` (книги и базы агентов), файлы `secrets.json` (ключи) и `settings.json`
+(выбор из интерфейса). Скопировали их рядом с проектом — и на новой машине всё
+на месте; в git они не попадают.
 
 ## Подготовка базы
 
@@ -222,7 +261,7 @@ python app.py
 
 | Провайдер | Ключ | Примечание |
 |---|---|---|
-| `ollama` | не нужен | локально, по умолчанию |
+| `ollama` | не нужен | локально, по умолчанию; модели — [ollama.com/search](https://ollama.com/search) |
 | `groq` | `GROQ_API_KEY` | бесплатно, очень быстро |
 | `gemini` | `GEMINI_API_KEY` | бесплатный тариф Google |
 | `openrouter` | `OPENROUTER_API_KEY` | есть бесплатные модели |
@@ -293,7 +332,7 @@ python app.py
 ## Тесты
 
 ```bash
-python -m unittest tests.test_database tests.test_parsers tests.test_search tests.test_providers tests.test_models tests.test_agents tests.test_jobs tests.test_store tests.test_app tests.test_ocr tests.test_settings tests.test_drop
+python -m unittest discover -s tests -t .     # один файл: python -m unittest tests.test_jobs
 ```
 
 Тесты автономные: не требуют Ollama, моделей и рабочей базы.

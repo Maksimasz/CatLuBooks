@@ -56,6 +56,7 @@ embeddings:
 llm:
   # provider: ollama | openai | openrouter | любой OpenAI-совместимый сервер
   provider: ollama
+  # Модель должна быть уже скачана на этом компьютере: ollama pull <модель>
   model: yandex/YandexGPT-5-Lite-8B-instruct-GGUF:latest
   # base_url можно не указывать — подставится под provider:
   #   ollama -> http://localhost:11434/v1, openai -> https://api.openai.com/v1
