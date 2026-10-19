@@ -42,6 +42,7 @@ CatLuBooks/
 │   ├── models.py       # список моделей для интерфейса
 │   └── store.py        # обёртка хранилища для веб-слоя
 ├── web/                # интерфейс чата + PWA (манифест, service worker)
+├── tools/drop.py       # удаление книг и очистка базы
 ├── tests/              # автономные тесты (без Ollama и моделей)
 ├── requirements.txt
 └── LICENSE
@@ -74,6 +75,19 @@ python -m core.database
 страницы-картинки дополнительно распознаются (это заметно дольше, но
 возвращает сканы в поиск). Файлы `.djvu` и `.mobi` не читаются: нужен
 конвертер.
+
+### Убрать данные из базы
+
+```bash
+python tools/drop.py --list            # что лежит в базе: фрагменты по файлам
+python tools/drop.py "Плов.pdf"        # убрать книгу целиком
+python tools/drop.py --all             # стереть всю базу
+```
+
+Перед этим остановите сервер (`Ctrl+C`): он держит базу открытой. Сам файл
+уберите из `research/`, иначе следующая пересборка вернёт книгу обратно.
+Стирать базу целиком не обязательно: пустая пересобирается так же, как и
+неполная, а `chroma_db` можно просто удалить, когда сервер остановлен.
 
 ### Как устроена индексация
 
@@ -206,7 +220,7 @@ python app.py
 ## Тесты
 
 ```bash
-python -m unittest tests.test_database tests.test_parsers tests.test_search tests.test_providers tests.test_models
+python -m unittest tests.test_database tests.test_parsers tests.test_search tests.test_providers tests.test_models tests.test_drop
 ```
 
 Тесты автономные: не требуют Ollama, моделей и рабочей базы.
