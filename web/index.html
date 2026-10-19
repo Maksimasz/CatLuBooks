@@ -9,7 +9,7 @@
   <link rel="manifest" href="/manifest.webmanifest">
   <link rel="icon" href="/icon-192.png">
   <link rel="apple-touch-icon" href="/icon-192.png">
-  <link rel="stylesheet" href="/style.css?v=16">
+  <link rel="stylesheet" href="/style.css?v=20">
 </head>
 <body>
   <header class="topbar">
@@ -38,12 +38,20 @@
     <button id="send" type="submit" aria-label="Отправить">➤</button>
   </form>
 
+  <div id="overlay" class="overlay" hidden>
+    <div class="overlay-card">
+      <div class="spinner"></div>
+      <div id="overlay-text" class="overlay-text">Сервер перезапускается…</div>
+    </div>
+  </div>
+
   <div id="panel" class="panel" hidden>
     <div class="panel-card" role="dialog" aria-modal="true" aria-label="Настройки">
       <header class="panel-head">
         <nav class="tabs" id="tabs">
           <button class="tab" data-tab="agents" type="button">Агенты</button>
           <button class="tab" data-tab="books" type="button">Книги</button>
+          <button class="tab" data-tab="history" type="button">История</button>
           <button class="tab" data-tab="models" type="button">Модели</button>
           <button class="tab" data-tab="base" type="button">База</button>
           <button class="tab" data-tab="server" type="button">Сервер</button>
@@ -96,6 +104,17 @@
             убираются сами.</p>
         </section>
 
+        <section class="tab-page" data-page="history" hidden>
+          <div class="row-new">
+            <button id="history-clear" class="danger" type="button">Очистить историю</button>
+          </div>
+          <div id="history-list" class="list"></div>
+          <p class="note">Каждый ответ чата сохраняется сюда: вопрос, ответ и
+            источники. Нажмите на запись, чтобы развернуть её. Удалить ненужные
+            можно кнопкой 🗑 — они больше не будут занимать место.</p>
+        </section>
+        </section>
+
         <section class="tab-page" data-page="models" hidden>
           <label class="field">Провайдер
             <select id="provider" title="Провайдер модели"></select>
@@ -143,6 +162,6 @@
     </div>
   </div>
 
-  <script src="/app.js?v=16"></script>
+  <script src="/app.js?v=20"></script>
 </body>
 </html>

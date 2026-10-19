@@ -280,5 +280,53 @@ class ApiTests(unittest.TestCase):
         self.server.stop.assert_called_once()
 
 
+    # --- история поиска ---------------------------------------------------
+    def test_history_is_loaded_and_saved(self):
+        agent = self.agents.create("Кулинария")
+        saved = self.client.post(
+            f"/api/agents/{agent.slug}/history",
+            json={"question": "как варить бульон", "answer": "варите 2 часа",
+                  "sources": [{"file": "book.pdf", "page": 5}],
+                  "provider": "ollama", "model": "llama3"}).json()
+        self.assertTrue(saved["ok"])
+        self.assertTrue(saved["entry"]["id"])
+
+        data = self.client.get(f"/api/agents/{agent.slug}/history").json()
+        self.assertEqual(data["total"], 1)
+        self.assertEqual(data["entries"][0]["question"], "как варить бульон")
+        self.assertEqual(data["entries"][0]["answer"], "варите 2 часа")
+
+    def test_empty_question_is_rejected(self):
+        agent = self.agents.create("Кулинария")
+        response = self.client.post(f"/api/agents/{agent.slug}/history",
+                                    json={"question": "   "})
+        self.assertEqual(response.status_code, 400)
+
+    def test_history_entry_can_be_deleted(self):
+        agent = self.agents.create("Кулинария")
+        entry = self.client.post(f"/api/agents/{agent.slug}/history",
+                                 json={"question": "q", "answer": "a"}).json()["entry"]
+        response = self.client.delete(
+            f"/api/agents/{agent.slug}/history/{entry['id']}")
+        self.assertEqual(response.status_code, 200)
+        data = self.client.get(f"/api/agents/{agent.slug}/history").json()
+        self.assertEqual(data["total"], 0)
+
+    def test_missing_history_entry_returns_404(self):
+        agent = self.agents.create("Кулинария")
+        response = self.client.delete(f"/api/agents/{agent.slug}/history/nope")
+        self.assertEqual(response.status_code, 404)
+
+    def test_history_can_be_cleared(self):
+        agent = self.agents.create("Кулинария")
+        self.client.post(f"/api/agents/{agent.slug}/history", json={"question": "q1", "answer": "a"})
+        self.client.post(f"/api/agents/{agent.slug}/history", json={"question": "q2", "answer": "b"})
+        response = self.client.delete(f"/api/agents/{agent.slug}/history")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["removed"], 2)
+        data = self.client.get(f"/api/agents/{agent.slug}/history").json()
+        self.assertEqual(data["total"], 0)
+
+
 if __name__ == '__main__':
     unittest.main()

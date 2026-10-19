@@ -28,6 +28,8 @@ from config import Config, load_config, resolve_llm, save_setting
 from core import ocr, parsers
 from core.agents import Agent, AgentError, AgentNotFound, Agents
 from core.database import UNKNOWN_SOURCE
+from core.history import add as history_add, clear as history_clear
+from core.history import delete as history_delete, load as history_load
 from core.jobs import Jobs
 from core.llm import LLMError, OpenAICompatClient
 from core.models import forget_models, provider_models
@@ -492,20 +494,28 @@ async def upload_books(slug: str, files: list[UploadFile] = File(...)):
 
 
 @app.delete("/api/agents/{slug}/book")
-async def delete_book(slug: str, name: str = Query(min_length=1)):
+async def delete_book(slug: str, name: str = Query(min_length=1), mode: str = Query("full")):
     """Удаляет книгу: сначала фрагменты из базы, потом сам файл.
 
     Имя приходит строкой запроса, а не частью адреса: так удаляется и книга
     из подпапки, и фрагменты книги, файл которой уже убрали руками.
     """
+    if mode not in ("file", "full"):
+        raise HTTPException(status_code=400,
+                            detail="Режим удаления: file (только файл) или full (файл и база)")
     try:
+        if mode == "file":
+            gone = await asyncio.to_thread(AGENTS.remove_book, slug, name)
+            if not gone:
+                raise HTTPException(status_code=404, detail=f"Файла «{name}» нет")
+            return {"ok": True, "removed": 0, "file": True, "mode": "file"}
         removed = await asyncio.to_thread(REGISTRY.get(slug).delete_source, name)
         gone = await asyncio.to_thread(AGENTS.remove_book, slug, name)
     except AgentError as exc:
         raise http_error(exc) from exc
     if not gone and not removed:
         raise HTTPException(status_code=404, detail=f"Книги «{name}» нет ни в базе, ни в папке")
-    return {"ok": True, "removed": removed, "file": gone}
+    return {"ok": True, "removed": removed, "file": gone, "mode": "full"}
 
 
 @app.post("/api/agents/{slug}/index")
@@ -558,6 +568,68 @@ async def clear_base(slug: str):
         removed = await asyncio.to_thread(REGISTRY.get(slug).clear)
     except AgentError as exc:
         raise http_error(exc) from exc
+    return {"ok": True, "removed": removed}
+
+
+# --- История поиска -----------------------------------------------------
+class HistoryEntry(BaseModel):
+    question: str
+    answer: str = ""
+    sources: list[dict] = []
+    provider: str = ""
+    model: str = ""
+
+
+@app.get("/api/agents/{slug}/history")
+async def list_history(slug: str, limit: int = 50, offset: int = 0):
+    """Сохранённые ответы агента: чтобы не искать снова."""
+    try:
+        agent = AGENTS.get(slug)
+    except AgentError as exc:
+        raise http_error(exc) from exc
+    entries = await asyncio.to_thread(history_load, str(agent.path))
+    return {"slug": slug, "total": len(entries),
+            "entries": entries[offset:offset + limit]}
+
+
+@app.post("/api/agents/{slug}/history")
+async def save_history(slug: str, req: HistoryEntry):
+    """Сохраняет ответ (вопрос + ответ + источники) в историю агента."""
+    try:
+        agent = AGENTS.get(slug)
+    except AgentError as exc:
+        raise http_error(exc) from exc
+    if not req.question.strip():
+        raise HTTPException(status_code=400, detail="Вопрос пуст")
+    entry = await asyncio.to_thread(
+        history_add, str(agent.path),
+        question=req.question, answer=req.answer, sources=req.sources,
+        provider=req.provider, model=req.model)
+    return {"ok": True, "entry": entry}
+
+
+@app.delete("/api/agents/{slug}/history/{entry_id}")
+async def delete_history_entry(slug: str, entry_id: str):
+    """Удаляет одну запись из истории."""
+    try:
+        agent = AGENTS.get(slug)
+    except AgentError as exc:
+        raise http_error(exc) from exc
+    removed = await asyncio.to_thread(history_delete, str(agent.path), entry_id)
+    if not removed:
+        raise HTTPException(status_code=404,
+                            detail=f"Записи «{entry_id}» в истории нет")
+    return {"ok": True}
+
+
+@app.delete("/api/agents/{slug}/history")
+async def clear_history(slug: str):
+    """Очищает всю историю агента."""
+    try:
+        agent = AGENTS.get(slug)
+    except AgentError as exc:
+        raise http_error(exc) from exc
+    removed = await asyncio.to_thread(history_clear, str(agent.path))
     return {"ok": True, "removed": removed}
 
 

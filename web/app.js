@@ -32,6 +32,10 @@ const modelListEl = document.getElementById("model-list");
 const keyBtn = document.getElementById("keybtn");
 const modelStatusEl = document.getElementById("model-status");
 const baseStatsEl = document.getElementById("base-stats");
+const historyListEl = document.getElementById("history-list");
+const historyClearEl = document.getElementById("history-clear");
+const overlayEl = document.getElementById("overlay");
+const overlayTextEl = document.getElementById("overlay-text");
 const baseClearEl = document.getElementById("base-clear");
 const agentRenameEl = document.getElementById("agent-rename");
 const agentDeleteEl = document.getElementById("agent-delete");
@@ -133,6 +137,7 @@ function selectTab(name) {
   if (name === "books") { refreshBooks(); loadOcr(); }
   if (name === "base") refreshAgents();
   if (name === "server") refreshServer();
+  if (name === "history") refreshHistory();
 }
 
 gearEl.addEventListener("click", () => openPanel());
@@ -423,13 +428,28 @@ function bookRow(book) {
   row.appendChild(main);
 
   const actions = el("div", "row-actions");
-  const remove = el("button", "icon danger", "🗑");
-  remove.type = "button";
-  remove.dataset.act = "delete";
-  remove.title = book.missing
-    ? "Убрать фрагменты книги, которой нет в папке"
-    : "Удалить книгу: файл и её фрагменты";
-  actions.appendChild(remove);
+  if (book.missing) {
+    const remove = el("button", "icon danger", "🗑");
+    remove.type = "button";
+    remove.dataset.act = "delete";
+    remove.dataset.mode = "full";
+    remove.title = "Убрать фрагменты из базы (файла уже нет)";
+    actions.appendChild(remove);
+  } else {
+    const fileOnly = el("button", "icon", "📄");
+    fileOnly.type = "button";
+    fileOnly.dataset.act = "delete";
+    fileOnly.dataset.mode = "file";
+    fileOnly.title = "Удалить только файл с диска — фрагменты в базе останутся";
+    actions.appendChild(fileOnly);
+
+    const full = el("button", "icon danger", "🗑");
+    full.type = "button";
+    full.dataset.act = "delete";
+    full.dataset.mode = "full";
+    full.title = "Удалить книгу и её фрагменты из базы";
+    actions.appendChild(full);
+  }
   row.appendChild(actions);
   return row;
 }
@@ -439,17 +459,27 @@ bookListEl.addEventListener("click", async (event) => {
   if (!button || !currentSlug) return;
   const name = button.closest(".row").dataset.name;
   const book = booksCache.find((item) => item.name === name) || {};
-  const question = book.missing
-    ? `Файла «${name}» в папке уже нет. Убрать из базы оставшиеся фрагменты (${book.chunks || 0})?`
-    : `Удалить «${name}»: файл с диска и её фрагменты из базы?`;
+  const mode = button.dataset.mode || "full";
+  let question;
+  if (book.missing) {
+    question = `Файла «${name}» в папке уже нет. Убрать из базы оставшиеся фрагменты (${book.chunks || 0})?`;
+  } else if (mode === "file") {
+    question = `Удалить только файл «${name}» с диска?\nФрагменты в базе останутся — знания продолжат искаться.`;
+  } else {
+    question = `Удалить «${name}» полностью: файл с диска и фрагменты из базы?`;
+  }
   if (!window.confirm(question)) return;
   try {
     const data = await api(
-      `/api/agents/${encodeURIComponent(currentSlug)}/book?name=${encodeURIComponent(name)}`,
+      `/api/agents/${encodeURIComponent(currentSlug)}/book?name=${encodeURIComponent(name)}&mode=${mode}`,
       { method: "DELETE" });
-    showNote(data.file
-      ? `«${name}» удалена: файл и фрагментов ${data.removed}`
-      : `«${name}»: файла уже не было, убрано фрагментов ${data.removed}`);
+    if (mode === "file") {
+      showNote(`«${name}»: файл удалён, база не тронута.`);
+    } else {
+      showNote(data.file
+        ? `«${name}» удалена: файл и фрагментов ${data.removed}`
+        : `«${name}»: файла уже не было, убрано фрагментов ${data.removed}`);
+    }
     refreshBooks();
     refreshAgents();
   } catch (error) {
@@ -855,6 +885,35 @@ async function refreshStats() {
 }
 
 /* ---- Сервер ----------------------------------------------------------- */
+let restarting = false;        // ждём, пока перезапущенный сервер поднимется
+
+function showOverlay(text) {
+  overlayTextEl.textContent = text;
+  overlayEl.hidden = false;
+}
+
+function hideOverlay() {
+  overlayEl.hidden = true;
+}
+
+/** Проверка связи: сервер упал или вернулся — показываем/прячем оверлей. */
+setInterval(async () => {
+  if (document.hidden) return;
+  let ok = false;
+  try {
+    const response = await fetch("/health", { cache: "no-store" });
+    ok = response.ok;
+  } catch { ok = false; }
+  if (!ok) {
+    if (!overlayEl.hidden) return;
+    showOverlay(restarting ? "Сервер перезапускается…"
+                           : "Сервер недоступен. Проверьте, запущен ли он.");
+  } else if (!overlayEl.hidden) {
+    hideOverlay();
+    if (restarting) { restarting = false; location.reload(); }
+  }
+}, 3000);
+
 const serverStatusEl = document.getElementById("server-status");
 const serverRestartEl = document.getElementById("server-restart");
 const serverStopEl = document.getElementById("server-stop");
@@ -899,15 +958,18 @@ serverRestartEl.addEventListener("click", async () => {
   if (!window.confirm("Перезапустить сервер?\nОн выключится и включится заново через пару секунд.")) return;
   serverRestartEl.disabled = true;
   serverStopEl.disabled = true;
+  restarting = true;
+  showOverlay("Сервер перезапускается…");
   try {
     await api("/api/server/restart", { method: "POST" });
   } catch (error) {
+    restarting = false;
     serverRestartEl.disabled = false;
     serverStopEl.disabled = false;
+    hideOverlay();
     showNote(error.message, "error");
     return;
   }
-  showNote("Сервер перезапускается… страница обновится сама, когда он поднимется.");
   await waitForServer();
 });
 
@@ -937,6 +999,92 @@ async function waitForServer() {
   }
   showNote("Сервер не ответил за минуту. Запустите его на компьютере: uv run python app.py", "error");
 }
+
+/* ---- История поиска --------------------------------------------------- */
+async function refreshHistory() {
+  if (!currentSlug) { historyListEl.innerHTML = ""; return; }
+  let data;
+  try {
+    data = await api(`/api/agents/${encodeURIComponent(currentSlug)}/history`);
+  } catch (error) { showNote(error.message, "error"); return; }
+  renderHistory(data.entries || []);
+}
+
+function renderHistory(entries) {
+  historyListEl.innerHTML = "";
+  if (!entries.length) {
+    historyListEl.appendChild(el("div", "empty", "История пуста: ответы чата сохраняются сюда."));
+    return;
+  }
+  entries.forEach((entry) => historyListEl.appendChild(historyItem(entry)));
+}
+
+function historyItem(entry) {
+  const wrap = el("div", "row history-item");
+  wrap.dataset.id = entry.id;
+
+  const main = el("div", "row-main");
+  const title = el("div", "row-title", entry.question || "(без вопроса)");
+  main.appendChild(title);
+  const date = entry.created ? new Date(entry.created * 1000).toLocaleString() : "";
+  const preview = (entry.answer || "").replace(/\s+/g, " ").slice(0, 120);
+  main.appendChild(el("div", "row-sub", `${date} · ${preview}${preview.length >= 120 ? "…" : ""}`));
+  wrap.appendChild(main);
+
+  const actions = el("div", "row-actions");
+  const remove = el("button", "icon danger", "🗑");
+  remove.type = "button";
+  remove.title = "Удалить запись";
+  remove.addEventListener("click", async (event) => {
+    event.stopPropagation();
+    if (!window.confirm("Удалить запись из истории?")) return;
+    try {
+      await api(`/api/agents/${encodeURIComponent(currentSlug)}/history/${encodeURIComponent(entry.id)}`,
+                { method: "DELETE" });
+      refreshHistory();
+    } catch (error) { showNote(error.message, "error"); }
+  });
+  actions.appendChild(remove);
+  wrap.appendChild(actions);
+
+  // Разворачивание: полный ответ + источники.
+  const detail = el("div", "history-detail");
+  detail.hidden = true;
+  const answer = el("div", "history-answer");
+  answer.innerHTML = renderMarkdown(entry.answer || "");
+  detail.appendChild(answer);
+  if (entry.sources && entry.sources.length) {
+    const src = el("div", "sources");
+    const list = el("div", "src-list");
+    (entry.sources || []).forEach((group) => {
+      const row = el("div", "src-row");
+      row.appendChild(el("span", "src-file", group.file || ""));
+      row.appendChild(el("span", "src-page",
+        group.page != null ? `${group.unit || "стр."} ${group.page}` : ""));
+      list.appendChild(row);
+    });
+    src.appendChild(list);
+    detail.appendChild(src);
+  }
+  wrap.appendChild(detail);
+
+  wrap.addEventListener("click", (event) => {
+    if (event.target.closest("button")) return;
+    detail.hidden = !detail.hidden;
+  });
+  return wrap;
+}
+
+historyClearEl.addEventListener("click", async () => {
+  if (!currentSlug) return;
+  if (!window.confirm("Очистить всю историю агента?")) return;
+  try {
+    const data = await api(`/api/agents/${encodeURIComponent(currentSlug)}/history`,
+                          { method: "DELETE" });
+    showNote(`История очищена: убрано ${data.removed} записей.`);
+    refreshHistory();
+  } catch (error) { showNote(error.message, "error"); }
+});
 
 /* ---- Модели и ключи --------------------------------------------------- */
 const savedModel = (provider) => localStorage.getItem(`catlu.model.${provider}`) || "";
@@ -1430,7 +1578,27 @@ async function streamChat(message, prior) {
 
   renderAnswer(bubble, text, false);
   if (sources) addSources(wrap, sources);
+  // Найденный ответ сохраняется в историю, чтобы потом не искать снова.
+  if (text && currentSlug && !text.includes("⚠️")) {
+    saveHistory(message, text, sources);
+  }
   history.push({ role: "assistant", content: text });
+}
+
+async function saveHistory(question, answer, sources) {
+  try {
+    await api(`/api/agents/${encodeURIComponent(currentSlug)}/history`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        question,
+        answer,
+        sources: sources || [],
+        provider: currentProvider(),
+        model: currentModel(),
+      }),
+    });
+  } catch { /* история не сохранилась — ответ уже показан, не критично */ }
 }
 
 async function submit(text) {
