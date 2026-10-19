@@ -1,6 +1,6 @@
 """Проверки клиента модели: таймауты и понятные ошибки."""
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
 
@@ -44,6 +44,20 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(LLMError) as caught:
                 await self.client.chat([{"role": "user", "content": "привет"}])
         self.assertIn("порт закрыт", str(caught.exception))
+
+    async def test_draft_can_get_its_own_token_limit(self):
+        """Черновику слияния хватает меньше токенов, чем полному ответу."""
+        response = Mock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = {
+            "choices": [{"message": {"content": "черновик"}}]}
+        post = AsyncMock(return_value=response)
+        with patch.object(self.client._client, "post", new=post):
+            text = await self.client.chat([{"role": "user", "content": "черновик"}],
+                                          max_tokens=900)
+
+        self.assertEqual(text, "черновик")
+        self.assertEqual(post.call_args.kwargs["json"]["max_tokens"], 900)
 
 
 if __name__ == "__main__":

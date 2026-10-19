@@ -52,12 +52,18 @@ class OpenAICompatClient:
             "max_tokens": self.max_tokens,
         }
 
-    async def chat(self, messages: List[Dict[str, str]]) -> str:
-        """Один запрос без стриминга. Возвращает готовый текст ответа."""
+    async def chat(self, messages: List[Dict[str, str]],
+                   max_tokens: int | None = None) -> str:
+        """Один запрос без стриминга. Возвращает готовый текст ответа.
+
+        max_tokens — свой лимит для этого запроса: черновику слияния хватает
+        меньше, чем полному ответу, а на CPU длинная генерация идёт долго.
+        """
+        payload = self._payload(messages, False)
+        if max_tokens:
+            payload["max_tokens"] = max_tokens
         try:
-            response = await self._client.post(
-                "chat/completions", json=self._payload(messages, False)
-            )
+            response = await self._client.post("chat/completions", json=payload)
             response.raise_for_status()
         except httpx.TimeoutException as exc:
             raise LLMError(

@@ -301,9 +301,12 @@ async def stream_chat(req: ChatRequest, app: FastAPI):
         try:
             yield sse("stage", {"text": "Свожу найденное в один рецепт…"})
             # Черновик идёт без стрима и с большим контекстом — времени и
-            # таймаута ему нужно больше, чем обычному ответу.
-            draft = await llm.chat(build_messages(
-                req, context, CONFIG.prompt.synthesis_template))
+            # таймаута ему нужно больше, чем обычному ответу. Свой лимит
+            # длины: черновику хватает компактного рецепта, а на CPU длинная
+            # генерация идёт слишком долго.
+            draft = await llm.chat(
+                build_messages(req, context, CONFIG.prompt.synthesis_template),
+                max_tokens=CONFIG.llm.merge_max_tokens)
         except LLMError as exc:
             yield sse("error", {"message": str(exc)})
             yield sse("done", {})

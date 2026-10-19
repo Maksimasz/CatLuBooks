@@ -84,9 +84,20 @@ def spawn_successor(env_extra: Optional[Dict[str, str]] = None) -> int:
     env = dict(os.environ)
     env[SUCCESSOR_ENV] = "1"
     env.update(env_extra or {})
+    # Вывод преемника: в консоли — как обычно, чтобы всё было видно сразу
+    # и Ctrl+C работал; при запуске через файл или трубу — в отдельный журнал,
+    # иначе преемник продолжил бы писать в поток, который уже никто не читает.
+    handle = None
+    if not sys.stdout or not sys.stdout.isatty():
+        log_path = ROOT / "logs" / "server.log"
+        try:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            handle = open(log_path, "a", encoding="utf-8", errors="replace")
+        except OSError:
+            handle = None
     process = subprocess.Popen(
         [sys.executable, "-X", "utf8", str(ROOT / "app.py")],
-        cwd=str(ROOT), env=env,
+        cwd=str(ROOT), env=env, stdout=handle, stderr=handle,
     )
     return process.pid
 
