@@ -85,6 +85,54 @@ class RegistryTests(unittest.TestCase):
         store._db.set_ocr.assert_called_once_with("auto")
         self.assertEqual(self.cfg.store.ocr, "auto")   # новые базы тоже с OCR
 
+    def test_diverse_search_takes_best_chunk_from_each_book(self):
+        """Для сведения нужны разные книги: по лучшему фрагменту из каждой."""
+        with patch("core.store.RAGDatabase") as database:
+            registry = StoreRegistry(self.cfg, self.agents)
+            store = registry.get("kulinariya")
+            store._db.search_similar.return_value = [
+                {"metadata": {"source": "Плов.pdf"}, "document": "плов раз"},
+                {"metadata": {"source": "Плов.pdf"}, "document": "плов ещё"},
+                {"metadata": {"source": "Борщ.pdf"}, "document": "борщ раз"},
+                {"metadata": {"source": "Салат.pdf"}, "document": "салат раз"},
+            ]
+            store._db.expand_context.side_effect = lambda items: items
+
+            results = store.search_diverse("плов", max_books=3)
+
+        # По одной книге — один фрагмент, даже если она в выдаче дважды.
+        self.assertEqual([r["document"] for r in results],
+                         ["плов раз", "борщ раз", "салат раз"])
+
+    def test_diverse_search_respects_limit_of_books(self):
+        with patch("core.store.RAGDatabase") as database:
+            registry = StoreRegistry(self.cfg, self.agents)
+            store = registry.get("kulinariya")
+            store._db.search_similar.return_value = [
+                {"metadata": {"source": f"книга{i}.pdf"}} for i in range(10)
+            ]
+            store._db.expand_context.side_effect = lambda items: items
+
+            results = store.search_diverse("плов", max_books=2)
+
+        self.assertEqual(len(results), 2)
+
+    def test_context_uses_given_budget(self):
+        """При сведении контекст больше: рецепты не должны обрезаться."""
+        with patch("core.store.RAGDatabase", side_effect=lambda **kw: Mock()):
+            registry = StoreRegistry(self.cfg, self.agents)
+            store = registry.get("kulinariya")
+            long_text = "х" * 2000
+            store._db.search_similar.return_value = [
+                {"metadata": {"source": "Плов.pdf", "page": 3}, "document": long_text},
+            ]
+            store._db.expand_context.side_effect = lambda items: items
+
+            small = store.format_context(store.search("плов"), budget=500)
+            big = store.format_context(store.search("плов"), budget=8000)
+
+        self.assertLess(len(small), len(big))
+
     def test_index_and_delete_are_delegated_to_the_database(self):
         with patch("core.store.RAGDatabase") as database:
             registry = StoreRegistry(self.cfg, self.agents)

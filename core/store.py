@@ -29,7 +29,26 @@ class VectorStore:
         n = n_results or self.cfg.search.n_results
         return self._db.expand_context(self._db.search_similar(query, n_results=n))
 
-    def format_context(self, results: List[Dict[str, Any]]) -> str:
+    def search_diverse(self, query: str, max_books: int) -> List[Dict[str, Any]]:
+        """Поиск по разным книгам: лучший фрагмент из каждой.
+
+        Обычный поиск берёт несколько лучших фрагментов подряд — а это
+        часто куски одной книги. Для сведения рецептов нужны разные
+        источники: один и тот же рецепт в десяти книгах — это десять
+        вариантов, из которых можно собрать один хороший.
+        """
+        pool = self._db.search_similar(query, n_results=max(max_books * 4, 12))
+        by_book: Dict[str, Dict[str, Any]] = {}
+        for item in pool:
+            source = (item.get("metadata") or {}).get("source")
+            if source and source not in by_book:
+                by_book[source] = item
+            if len(by_book) >= max_books:
+                break
+        return self._db.expand_context(list(by_book.values()))
+
+    def format_context(self, results: List[Dict[str, Any]],
+                       budget: int | None = None) -> str:
         """Превращает найденные фрагменты в текст для промпта.
 
         Фрагменты добавляются целиком: разрезанный пополам рецепт модели
@@ -37,7 +56,7 @@ class VectorStore:
         показывается только самый важный (первый), чтобы ответ не остался
         совсем без данных.
         """
-        budget = self.cfg.search.max_context_chars
+        budget = budget or self.cfg.search.max_context_chars
         parts: List[str] = []
         used = 0
         for i, result in enumerate(results, 1):
@@ -60,24 +79,32 @@ class VectorStore:
         return "\n\n".join(parts)
 
     def sources(self, results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Краткое описание источников (без дублей) для интерфейса."""
+        """Краткое описание источников (без дублей) для интерфейса.
+
+        У источника перечисляются все его номера: на одной странице книги
+        может попасть несколько фрагментов, и модель в ответе сослётся на
+        любой из них — значит, в панели должны быть видны все.
+        """
         out: List[Dict[str, Any]] = []
-        seen = set()
+        seen: Dict[tuple, Dict[str, Any]] = {}
         for i, result in enumerate(results, 1):
             meta = result.get("metadata") or {}
             source = meta.get("source", "Неизвестно")
             page = meta.get("page")
             key = (source, page)
-            if key in seen:
-                continue
-            seen.add(key)
-            out.append({
-                "index": i,
-                "source": source,
-                "page": page,
-                "unit": meta.get("unit") or "стр.",
-                "snippet": (result.get("document") or "")[:200],
-            })
+            entry = seen.get(key)
+            if entry is None:
+                entry = {
+                    "index": i,
+                    "indexes": [],
+                    "source": source,
+                    "page": page,
+                    "unit": meta.get("unit") or "стр.",
+                    "snippet": (result.get("document") or "")[:200],
+                }
+                seen[key] = entry
+                out.append(entry)
+            entry["indexes"].append(i)
         return out
 
     def stats(self) -> Dict[str, Any]:

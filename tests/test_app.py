@@ -189,6 +189,40 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.json()["ok"])
 
+    # --- сведение источников -------------------------------------------
+
+    def test_merge_status_is_reported(self):
+        data = self.client.get("/api/merge").json()
+
+        self.assertIn(data["mode"], ("off", "fast", "full"))
+        self.assertIn("fast", data["options"])
+
+    def test_merge_mode_can_be_switched(self):
+        before = app_module.CONFIG.search.merge_mode
+        with patch.object(app_module, "save_setting") as save:
+            response = self.client.post("/api/merge", json={"mode": "fast"})
+        self.addCleanup(setattr, app_module.CONFIG.search, "merge_mode", before)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["mode"], "fast")
+        self.assertEqual(app_module.CONFIG.search.merge_mode, "fast")
+        save.assert_called_once_with("search", "merge_mode", "fast")
+
+    def test_unknown_merge_mode_is_rejected(self):
+        response = self.client.post("/api/merge", json={"mode": "nonsense"})
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("off", response.json()["detail"])
+
+    def test_merge_prompts_are_configured(self):
+        """Режимы сведения используют свои промпты: слияние и ответ по черновику."""
+        prompt = app_module.CONFIG.prompt
+
+        self.assertIn("{context}", prompt.merge_template)
+        self.assertIn("{question}", prompt.merge_template)
+        self.assertIn("{context}", prompt.synthesis_template)
+        self.assertIn("ЧЕРНОВИК", prompt.answer_from_draft_template)
+
     # --- OCR ----------------------------------------------------------
 
     def test_ocr_status_is_reported(self):

@@ -180,20 +180,28 @@ class OcrRequest(BaseModel):
     enabled: bool = True
 
 
-def get_client(app: FastAPI, provider: str, model: str) -> OpenAICompatClient:
+class MergeRequest(BaseModel):
+    mode: str = "off"
+
+
+def get_client(app: FastAPI, provider: str, model: str,
+               timeout: int | None = None) -> OpenAICompatClient:
     """Клиент для пары (провайдер, модель), создаётся один раз и кэшируется."""
-    cache_key = (provider, model)
+    cache_key = (provider, model, timeout)
     client = app.state.clients.get(cache_key)
     if client is None:
-        client = OpenAICompatClient(resolve_llm(CONFIG.llm, provider, model))
+        client = OpenAICompatClient(resolve_llm(CONFIG.llm, provider, model),
+                                    timeout=timeout)
         app.state.clients[cache_key] = client
     return client
 
 
-def build_messages(req: ChatRequest, context: str) -> list[dict]:
+def build_messages(req: ChatRequest, context: str,
+                   template: str | None = None) -> list[dict]:
     """Собирает сообщения для модели: system + история + текущий вопрос."""
     prompt = CONFIG.prompt
-    template = prompt.answer_template if context else prompt.no_context_template
+    if template is None:
+        template = prompt.answer_template if context else prompt.no_context_template
     user_content = template.format(context=context, question=req.message)
 
     messages = [{"role": "system", "content": prompt.system}]
@@ -228,16 +236,30 @@ async def stream_chat(req: ChatRequest, app: FastAPI):
         yield sse("done", {})
         return
 
+    merge_mode = CONFIG.search.merge_mode
+    merging = merge_mode in ("fast", "full")
+
     try:
-        llm = get_client(app, provider, model)
+        # При сведении контекст большой, и первый токен приходит позже:
+        # модели нужно время, чтобы переварить найденное.
+        llm = get_client(app, provider, model,
+                        CONFIG.llm.merge_timeout if merging else None)
     except Exception as exc:
         yield sse("error", {"message": f"Не удалось настроить «{provider}»: {exc}"})
         yield sse("done", {})
         return
 
+
     try:
-        results = await asyncio.to_thread(store.search, req.message, None)
-        context = store.format_context(results)
+        if merging:
+            # Разные книги: один рецепт в десяти источниках — десять
+            # вариантов, из которых можно собрать один хороший.
+            results = await asyncio.to_thread(
+                store.search_diverse, req.message, CONFIG.search.merge_sources)
+            context = store.format_context(results, CONFIG.search.merge_context_chars)
+        else:
+            results = await asyncio.to_thread(store.search, req.message, None)
+            context = store.format_context(results)
     except Exception as exc:
         yield sse("error", {"message": f"Ошибка поиска: {exc}"})
         yield sse("done", {})
@@ -248,7 +270,8 @@ async def stream_chat(req: ChatRequest, app: FastAPI):
 
     found = store.sources(results) if results else []
     print(f"❓ [{agent.slug}] {req.message}  ({provider}/{model}, "
-          f"фрагментов {len(results)}, контекст {len(context)} символов)", flush=True)
+          f"фрагментов {len(results)}, контекст {len(context)} символов"
+          f"{f', сведение: {merge_mode}' if merging else ''})", flush=True)
     record = {
         "время": time.strftime("%Y-%m-%d %H:%M:%S"),
         "агент": agent.title,
@@ -270,9 +293,33 @@ async def stream_chat(req: ChatRequest, app: FastAPI):
         yield sse("done", {})
         return
 
+    # Полное сведение: сначала черновик из всех найденных вариантов,
+    # потом ответ по нему. Модель видит целиком то, что нашлось, и не
+    # выбрасывает половину рецепта, чтобы уложиться в один проход.
+    draft = ""
+    if merge_mode == "full" and context:
+        try:
+            yield sse("stage", {"text": "Свожу найденное в один рецепт…"})
+            # Черновик идёт без стрима и с большим контекстом — времени и
+            # таймаута ему нужно больше, чем обычному ответу.
+            draft = await llm.chat(build_messages(
+                req, context, CONFIG.prompt.synthesis_template))
+        except LLMError as exc:
+            yield sse("error", {"message": str(exc)})
+            yield sse("done", {})
+            return
+        if draft.strip():
+            record["черновик"] = draft
+            context = draft
+
+    template = None
+    if merging:
+        template = (CONFIG.prompt.answer_from_draft_template if draft
+                    else CONFIG.prompt.merge_template)
+
     answer: list[str] = []
     try:
-        async for piece in llm.stream(build_messages(req, context)):
+        async for piece in llm.stream(build_messages(req, context, template)):
             answer.append(piece)
             yield sse("token", {"text": piece})
     except LLMError as exc:
@@ -357,6 +404,26 @@ async def set_ocr(req: OcrRequest):
     REGISTRY.set_ocr(mode)               # уже открытые базы тоже
     data["enabled"] = mode != parsers.OCR_OFF
     return data
+
+
+@app.get("/api/merge")
+async def merge_status():
+    """Режим сведения источников: выключен, быстрый или полный."""
+    return {"mode": CONFIG.search.merge_mode,
+            "sources": CONFIG.search.merge_sources,
+            "options": ["off", "fast", "full"]}
+
+
+@app.post("/api/merge")
+async def set_merge(req: MergeRequest):
+    """Включает или выключает сведение нескольких источников в один ответ."""
+    mode = (req.mode or "").strip().lower()
+    if mode not in ("off", "fast", "full"):
+        raise HTTPException(status_code=400,
+                            detail="Режим сведения: off, fast или full")
+    save_setting("search", "merge_mode", mode)   # переживёт перезапуск сервера
+    CONFIG.search.merge_mode = mode
+    return {"mode": mode, "sources": CONFIG.search.merge_sources}
 
 
 @app.post("/api/keys")

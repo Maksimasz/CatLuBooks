@@ -24,7 +24,7 @@ class LLMError(RuntimeError):
 class OpenAICompatClient:
     """Обёртка над OpenAI-совместимым /chat/completions."""
 
-    def __init__(self, cfg: LLMConfig):
+    def __init__(self, cfg: LLMConfig, timeout: int | None = None):
         self.model = cfg.model
         self.temperature = cfg.temperature
         self.top_p = cfg.top_p
@@ -39,7 +39,7 @@ class OpenAICompatClient:
         self._client = httpx.AsyncClient(
             base_url=base_url,
             headers=headers,
-            timeout=httpx.Timeout(300.0, connect=10.0),
+            timeout=httpx.Timeout(float(timeout or cfg.timeout), connect=10.0),
         )
 
     def _payload(self, messages: List[Dict[str, str]], stream: bool) -> Dict:
@@ -59,8 +59,18 @@ class OpenAICompatClient:
                 "chat/completions", json=self._payload(messages, False)
             )
             response.raise_for_status()
+        except httpx.TimeoutException as exc:
+            raise LLMError(
+                f"Модель «{self.model}» не ответила за отведённое время. "
+                "Локальной модели на CPU нужно больше минут — увеличьте "
+                "llm.timeout в config.yaml или уменьшите объём контекста."
+            ) from exc
         except httpx.HTTPError as exc:
-            raise LLMError(f"Не удалось обратиться к модели «{self.model}»: {exc}") from exc
+            detail = str(exc).strip()
+            raise LLMError(
+                f"Не удалось обратиться к модели «{self.model}»"
+                f"{': ' + detail if detail else ''}"
+            ) from exc
 
         try:
             data = response.json()

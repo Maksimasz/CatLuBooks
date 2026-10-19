@@ -24,6 +24,8 @@ const reindexBtnEl = document.getElementById("reindex-btn");
 const jobEl = document.getElementById("job");
 const bookListEl = document.getElementById("book-list");
 const ocrToggleEl = document.getElementById("ocr-toggle");
+const mergeSwitchEl = document.getElementById("merge-switch");
+const mergeStatusEl = document.getElementById("merge-status");
 const ocrStatusEl = document.getElementById("ocr-status");
 const ocrHintEl = document.getElementById("ocr-hint");
 const providerEl = document.getElementById("provider");
@@ -144,7 +146,7 @@ function selectTab(name) {
     page.hidden = page.dataset.page !== name;
   });
   if (name === "agents") refreshAgents();
-  if (name === "books") { refreshBooks(); loadOcr(); }
+  if (name === "books") { refreshBooks(); loadOcr(); loadMerge(); }
   if (name === "base") refreshAgents();
   if (name === "server") refreshServer();
   if (name === "history") refreshHistory();
@@ -711,6 +713,57 @@ function renderOcr() {
   ocrStatusEl.textContent = parts.join(" · ");
   renderOcrHint();
 }
+
+/* ---- Сведение источников --------------------------------------------- */
+let mergeMode = "off";
+
+async function loadMerge() {
+  try {
+    const data = await api("/api/merge");
+    mergeMode = data.mode || "off";
+  } catch {
+    mergeMode = "off";
+  }
+  renderMerge();
+}
+
+function renderMerge() {
+  mergeSwitchEl.querySelectorAll("button").forEach((button) => {
+    const on = button.dataset.mode === mergeMode;
+    button.classList.toggle("on", on);
+    button.setAttribute("aria-pressed", on ? "true" : "false");
+  });
+  const texts = {
+    off: "выключено: модель отвечает по тому, что нашла",
+    fast: "быстро: модель сама сведёт найденное в один ответ",
+    full: "точно: два прохода — черновик, потом ответ (медленнее)",
+  };
+  mergeStatusEl.textContent = texts[mergeMode] || texts.off;
+}
+
+mergeSwitchEl.addEventListener("click", async (event) => {
+  const button = event.target.closest("button[data-mode]");
+  if (!button) return;
+  const mode = button.dataset.mode;
+  if (mode === mergeMode) return;
+  mergeSwitchEl.querySelectorAll("button").forEach((item) => { item.disabled = true; });
+  try {
+    const data = await api("/api/merge", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode }),
+    });
+    mergeMode = data.mode || mode;
+    showNote(mergeMode === "off"
+      ? "Сведение выключено."
+      : "Сведение включено: ответы будут собираться из всех найденных книг.");
+  } catch (error) {
+    showNote(error.message, "error");
+  } finally {
+    mergeSwitchEl.querySelectorAll("button").forEach((item) => { item.disabled = false; });
+    renderMerge();
+  }
+});
 
 /** Подсказка под переключателем: чего не хватает и что делать дальше. */
 function renderOcrHint() {
@@ -1515,7 +1568,13 @@ function addSources(wrap, sources) {
       byKey.set(key, group);
       groups.push(group);
     }
-    if (source.index != null) group.indexes.push(source.index);
+    // У источника могут быть свои номера: на одной странице книги попало
+    // несколько фрагментов, и модель сослётся на любой из них.
+    const own = (source.indexes && source.indexes.length) ? source.indexes
+               : (source.index != null ? [source.index] : []);
+    own.forEach((number) => {
+      if (!group.indexes.includes(number)) group.indexes.push(number);
+    });
   }
 
   sourcesPanelListEl.innerHTML = "";
@@ -1625,6 +1684,10 @@ async function streamChat(message, prior) {
         chatEl.scrollTop = chatEl.scrollHeight;
       } else if (ev.event === "sources") {
         sources = ev.data;
+      } else if (ev.event === "stage") {
+        // Сообщение о промежуточном шаге (сведение в два прохода).
+        text += (text ? "\n\n" : "") + "⏳ " + (ev.data.text || "");
+        renderAnswer(bubble, text, true);
       } else if (ev.event === "model") {
         setStatus(`${ev.data.provider} · ${ev.data.model} · агент «${ev.data.agent}»`);
       } else if (ev.event === "error") {

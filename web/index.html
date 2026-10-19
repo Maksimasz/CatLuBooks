@@ -9,7 +9,7 @@
   <link rel="manifest" href="/manifest.webmanifest">
   <link rel="icon" href="/icon-192.png">
   <link rel="apple-touch-icon" href="/icon-192.png">
-  <link rel="stylesheet" href="/style.css?v=23">
+  <link rel="stylesheet" href="/style.css?v=25">
 </head>
 <body>
   <header class="topbar">
@@ -106,6 +106,19 @@
           </div>
           <div id="ocr-hint" class="ocr-hint" hidden></div>
 
+          <div class="setting-row">
+            <div class="setting-main">
+              <div class="setting-title">Сводить рецепты из разных книг</div>
+              <div class="setting-sub" id="merge-status">проверяю…</div>
+            </div>
+            <div class="merge-switch" id="merge-switch" role="group"
+                 aria-label="Сведение источников">
+              <button type="button" data-mode="off">Выкл</button>
+              <button type="button" data-mode="fast">Быстро</button>
+              <button type="button" data-mode="full">Точно</button>
+            </div>
+          </div>
+
           <div id="job" class="job" hidden></div>
           <div id="book-list" class="list"></div>
           <p class="note">Индексировать — значит прочитать книги и положить их в базу
@@ -173,6 +186,6 @@
     </div>
   </div>
 
-  <script src="/app.js?v=23"></script>
+  <script src="/app.js?v=25"></script>
 </body>
 </html>
