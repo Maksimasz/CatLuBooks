@@ -85,7 +85,7 @@ CatLuBooks/
 
 | Что | Зачем | Где взять |
 |---|---|---|
-| Python 3.10+ | запускает сервер | <https://www.python.org/downloads/> |
+| Python 3.10+ | запускает сервер | <https://www.python.org/downloads/> — либо не ставить вовсе: uv скачает сам |
 | Модель эмбеддингов | поиск по книгам (локально, в облако не уходит) | скачается сама при первом запуске — [paraphrase-multilingual-MiniLM-L12-v2](https://huggingface.co/sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2) |
 | Ollama и модель генерации | ответы на этом ПК, без облака | [ollama.com/download](https://ollama.com/download), модели — [поиск](https://ollama.com/search) |
 | Ключ облачного провайдера | если ответы делает облако | таблица «Провайдеры моделей» ниже |
@@ -98,10 +98,34 @@ CatLuBooks/
 ```bash
 git clone https://github.com/Maksimasz/CatLuBooks.git
 cd CatLuBooks
+ollama pull yandex/YandexGPT-5-Lite-8B-instruct-GGUF   # модель генерации, или другая
+```
+
+Дальше — как удобнее: через **uv** (он сам скачает нужный Python, поставит
+зависимости и запустит; активировать окружение не нужно) или обычными
+`venv` + `pip`.
+
+**Через uv** — [uv](https://docs.astral.sh/uv/) ставится одной строкой:
+
+```bash
+# если uv ещё нет (Windows):
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+# Linux/macOS: curl -LsSf https://astral.sh/uv/install.sh | sh
+
+uv venv --python 3.12             # Python скачается сам, если его нет в системе
+uv pip install -r requirements.txt
+uv run python app.py
+```
+
+Запуск и в дальнейшем такой же: `uv run python app.py` — uv сам находит `.venv`
+в папке проекта. Обновить зависимости: `uv pip install -r requirements.txt`.
+
+**Через venv и pip**:
+
+```bash
 python -m venv .venv
-.\.venv\Scripts\activate          # Windows; Linux/macOS: source .venv/bin/activate
+.\.venv\Scripts\activate          # Linux/macOS: source .venv/bin/activate
 pip install -r requirements.txt   # около гигабайта: torch и остальное
-ollama pull yandex/YandexGPT-5-Lite-8B-instruct-GGUF   # или другую модель из llm.model
 python app.py
 ```
 

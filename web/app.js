@@ -577,7 +577,9 @@ function renderJob(job) {
   } else if (error) {
     label = `Не получилось: ${job.error || "неизвестная ошибка"}`;
   } else if (done) {
-    label = `Готово: в базе ${job.chunks} фрагментов` + (failed ? `, сбоев ${failed}` : "");
+    label = `Готово: в базе ${job.chunks} фрагментов`
+      + (failed ? `, сбоев ${failed}` : "")
+      + (job.skipped ? `, пропущено ${job.skipped}` : "");
   } else if (job.file) {
     label = `Читаю книгу ${job.index} из ${job.total || "?"}: ${job.file}`;
   } else {

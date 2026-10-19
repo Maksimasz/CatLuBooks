@@ -31,6 +31,7 @@ class Job:
     file: str = ""          # имя текущей книги
     chunks: int = 0         # сколько фрагментов уже записано
     failed: int = 0
+    skipped: int = 0        # книги, убранные из папки во время работы
     error: str = ""
     started: float = field(default_factory=time.time)
     finished: Optional[float] = None
@@ -46,6 +47,7 @@ class Job:
             "file": self.file,
             "chunks": self.chunks,
             "failed": self.failed,
+            "skipped": self.skipped,
             "error": self.error,
             "started": self.started,
             "finished": self.finished,
@@ -100,9 +102,14 @@ class Jobs:
         elif kind == "failed":
             job.failed += 1
             job._log(f"ошибка: {event.get('source')} — {event.get('message')}")
+        elif kind == "skipped":
+            # Файл убрали из папки, пока шла индексация: это не ошибка.
+            job.skipped += 1
+            job._log(f"пропущено (файла больше нет): {event.get('source')}")
         elif kind == "done":
             job.chunks = int(event.get("chunks") or job.chunks)
             job.failed = int(event.get("failed") or job.failed)
+            job.skipped = int(event.get("skipped") or job.skipped)
             job.state = "done"
             job.finished = time.time()
             job._log(f"Готово: {job.chunks} фрагментов, файлов {event.get('added')}")

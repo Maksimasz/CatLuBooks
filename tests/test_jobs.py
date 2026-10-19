@@ -47,6 +47,18 @@ class JobTests(unittest.TestCase):
         self.assertEqual(job.file, "вторая.pdf")
         self.assertEqual(job.index, 2)
 
+    def test_skipped_book_is_not_a_failure(self):
+        """Книгу убрали из папки во время индексации: это пропуск, а не сбой."""
+        job = self.jobs.start("cooking")
+        self.jobs.apply(job, {"event": "skipped", "source": "скан.pdf"})
+        self.jobs.apply(job, {"event": "done", "chunks": 10, "failed": 0,
+                              "skipped": 1, "added": 1})
+
+        self.assertEqual(job.skipped, 1)
+        self.assertEqual(job.failed, 0)
+        self.assertEqual(job.as_dict()["skipped"], 1)
+        self.assertTrue(any("скан.pdf" in line for line in job.as_dict()["log"]))
+
     def test_error_event_marks_the_job_failed(self):
         job = self.jobs.start("cooking")
         self.jobs.apply(job, {"event": "error", "message": "в папке нет книг"})

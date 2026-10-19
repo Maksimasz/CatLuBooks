@@ -291,6 +291,30 @@ class FolderTests(unittest.TestCase):
         self.assertEqual(sorted(calls), ['заметки.txt', 'книга.epub', 'рецепты.pdf'])
         self.assertIn('.djvu', output.getvalue())
 
+    def test_file_removed_from_folder_is_skipped_not_failed(self):
+        """Книгу убрали из папки, пока шла индексация: это пропуск, а не сбой."""
+        for name in ('а.txt', 'б.txt'):
+            Path(self.temp.name, name).write_bytes(b'x')
+        removed = Path(self.temp.name, 'б.txt')
+
+        def read(path):
+            removed.unlink()      # пока читалась первая книга, вторую убрали
+            return None
+
+        self.db.add_file_to_database = read
+        self.db.collection.count.return_value = 10
+        events = []
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            result = self.db.process_research_folder(
+                self.temp.name, progress=events.append)
+
+        self.assertTrue(result)
+        self.assertIn('Пропущены файлы', output.getvalue())
+        self.assertEqual([event['event'] for event in events],
+                         ['files', 'file', 'file', 'skipped', 'done'])
+        self.assertEqual(events[-1]['skipped'], 1)
+        self.assertEqual(events[-1]['failed'], 0)
+
     def test_empty_folder_is_reported(self):
         with contextlib.redirect_stdout(io.StringIO()) as output:
             result = self.db.process_research_folder(self.temp.name)

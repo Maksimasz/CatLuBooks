@@ -331,10 +331,19 @@ class RAGDatabase:
 
         successful_files = 0
         failed_files = []
+        missing_files = []
 
         for i, file_path in enumerate(files, 1):
             print(f"\n📋 Обрабатываю файл {i}/{len(files)}: {file_path.name}")
             self._report(event="file", source=file_path.name, index=i, total=len(files))
+
+            if not file_path.exists():
+                # Книгу убрали из папки, пока шла индексация: это не сбой,
+                # и в базу про неё ничего не попало.
+                print(f"⏭️ Файла больше нет: {file_path.name}")
+                missing_files.append(file_path.name)
+                self._report(event="skipped", source=file_path.name)
+                continue
 
             try:
                 _set_alarm(300)  # ограничение времени на файл, только для UNIX
@@ -363,10 +372,17 @@ class RAGDatabase:
             for file_name, error in failed_files:
                 print(f"  - {file_name}: {error}")
 
+        if missing_files:
+            print(f"⏭️ Пропущены файлы, убранные из папки во время работы: "
+                  f"{len(missing_files)}")
+            for file_name in missing_files:
+                print(f"  - {file_name}")
+
         total_docs = self.collection.count()
         print(f"📊 Всего документов в базе: {total_docs}")
         self._report(event="done", chunks=total_docs, files=len(files),
-                     failed=len(failed_files), added=successful_files)
+                     failed=len(failed_files), added=successful_files,
+                     skipped=len(missing_files))
 
         return successful_files > 0
 
