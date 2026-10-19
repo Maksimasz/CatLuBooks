@@ -32,10 +32,11 @@ prompt:
     ВОПРОС: {question}
 
 # --- Хранилище и эмбеддинги ---------------------------------
+# Агенты: agents/<латиница>/{agent.json, books/, db/} — у каждого своя база
+# и свои книги. Файлы создаются интерфейсом (⚙ → Агенты), трогать вручную
+# не нужно: папка агента переносится и удаляется целиком.
 store:
-  db_path: ./chroma_db
-  collection: research_papers
-  research_folder: ./research   # папка с книгами (регистр имени не важен)
+  agents_root: ./agents
   chunk_size: 1000
   chunk_overlap: 200
   # Какие файлы читать: pdf, epub, txt/md и fb2. Файлы .djvu/.mobi не читаются.

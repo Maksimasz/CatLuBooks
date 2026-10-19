@@ -9,16 +9,18 @@
   <link rel="manifest" href="/manifest.webmanifest">
   <link rel="icon" href="/icon-192.png">
   <link rel="apple-touch-icon" href="/icon-192.png">
-  <link rel="stylesheet" href="/style.css?v=6">
+  <link rel="stylesheet" href="/style.css?v=7">
 </head>
 <body>
   <header class="topbar">
     <div class="brand"><span class="dot"></span> CatLuBooks</div>
     <div class="controls">
-      <select id="provider" title="Провайдер модели"></select>
-      <input id="model" list="model-list" placeholder="модель" title="Модель" autocomplete="off" spellcheck="false">
-      <datalist id="model-list"></datalist>
-      <button id="keybtn" type="button" title="Ввести API-ключ">🔑</button>
+      <select id="agent" title="Агент: своя база знаний"></select>
+      <button id="model-label" class="model-label" type="button"
+              title="Модель и подключения — откроется в настройках"></button>
+      <button id="gear" class="icon" type="button" title="Настройки" aria-label="Настройки">
+        <svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true"><path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Zm7.4-2.6c.05-.3.1-.6.1-.9s-.05-.6-.1-.9l2-1.5-2-3.4-2.3.9a7.6 7.6 0 0 0-1.6-1L15 2H9l-.4 2.2c-.6.3-1.1.6-1.6 1l-2.3-.9-2 3.4 2 1.5c-.05.3-.1.6-.1.9s.05.6.1.9l-2 1.5 2 3.4 2.3-.9c.5.4 1 .7 1.6 1L9 22h6l.4-2.2c.6-.3 1.1-.6 1.6-1l2.3.9 2-3.4-2-1.5Z"/></svg>
+      </button>
     </div>
   </header>
 
@@ -36,6 +38,78 @@
     <button id="send" type="submit" aria-label="Отправить">➤</button>
   </form>
 
-  <script src="/app.js?v=6"></script>
+  <div id="panel" class="panel" hidden>
+    <div class="panel-card" role="dialog" aria-modal="true" aria-label="Настройки">
+      <header class="panel-head">
+        <nav class="tabs" id="tabs">
+          <button class="tab" data-tab="agents" type="button">Агенты</button>
+          <button class="tab" data-tab="books" type="button">Книги</button>
+          <button class="tab" data-tab="models" type="button">Модели</button>
+          <button class="tab" data-tab="base" type="button">База</button>
+        </nav>
+        <button id="panel-close" class="icon" type="button" title="Закрыть" aria-label="Закрыть">✕</button>
+      </header>
+      <div id="panel-note" class="panel-note" hidden></div>
+
+      <div class="panel-body">
+        <section class="tab-page" data-page="agents">
+          <div class="row-new">
+            <input id="agent-title" placeholder="Название агента, например Кулинария" autocomplete="off">
+            <button id="agent-create" class="primary" type="button">Создать</button>
+          </div>
+          <div id="agent-list" class="list"></div>
+          <p class="note">Агент — это отдельная база знаний: своя папка с книгами и своя
+            база внутри неё. Папка создаётся латиницей из названия, поэтому английские
+            версии надёжнее для переноса базы на другой компьютер.</p>
+        </section>
+
+        <section class="tab-page" data-page="books" hidden>
+          <div class="row-new">
+            <label class="upload">Загрузить книги
+              <input id="book-files" type="file" multiple
+                     accept=".pdf,.epub,.txt,.md,.fb2">
+            </label>
+            <button id="index-btn" class="primary" type="button">Индексировать</button>
+          </div>
+          <div id="job" class="job" hidden></div>
+          <div id="book-list" class="list"></div>
+          <p class="note">Индексировать — значит прочитать книги и положить их в базу
+            агента. Это может занять минуты; работа идёт в фоне, настройки можно закрыть.
+            Повторная индексация обновляет уже добавленные книги.</p>
+        </section>
+
+        <section class="tab-page" data-page="models" hidden>
+          <label class="field">Провайдер
+            <select id="provider" title="Провайдер модели"></select>
+          </label>
+          <label class="field">Модель
+            <input id="model-input" list="model-list" placeholder="модель"
+                   autocomplete="off" spellcheck="false">
+            <datalist id="model-list"></datalist>
+          </label>
+          <div class="row-new">
+            <button id="keybtn" class="ghost" type="button">🔑 Ввести API-ключ</button>
+          </div>
+          <p class="note" id="model-status"></p>
+          <p class="note">Ключи хранятся только на этом компьютере (файл secrets.json
+            в папке проекта) и в интерфейс больше не возвращаются.</p>
+        </section>
+
+        <section class="tab-page" data-page="base" hidden>
+          <div id="base-stats" class="stats-grid"></div>
+          <div class="row-new">
+            <button id="agent-rename" class="ghost" type="button">Переименовать</button>
+            <button id="base-clear" class="danger" type="button">Очистить базу</button>
+            <button id="agent-delete" class="danger" type="button">Удалить агента</button>
+          </div>
+          <p class="note">Очистка убирает из базы все фрагменты агента, книги на диске
+            остаются. Удаление агента стирает его папку целиком — вместе с книгами,
+            базой и настройками; отменить это нельзя.</p>
+        </section>
+      </div>
+    </div>
+  </div>
+
+  <script src="/app.js?v=7"></script>
 </body>
 </html>

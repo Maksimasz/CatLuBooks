@@ -41,9 +41,8 @@ class PromptConfig:
 
 @dataclass
 class StoreConfig:
-    db_path: str = "./chroma_db"
-    collection: str = "research_papers"
-    research_folder: str = "./research"
+    # Корень с агентами: agents/<латиница>/{agent.json, books/, db/}
+    agents_root: str = "./agents"
     chunk_size: int = 1000
     chunk_overlap: int = 200
     # Что читаем из папки с книгами.

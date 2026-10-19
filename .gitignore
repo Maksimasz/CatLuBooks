@@ -134,10 +134,8 @@ chroma_db*/
 # Ключи API (хранятся только локально)
 secrets.json
 
-# Research files (optional - remove this line if you want to include PDFs)
-Research/
-research/
-Research_backup/
+# Агенты: книги и базы пользователя (в репозиторий не попадают)
+agents/
 
 # IDE settings
 .vscode/

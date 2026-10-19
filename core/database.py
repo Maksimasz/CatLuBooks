@@ -6,7 +6,7 @@
 
 import os
 import sys
-from typing import List, Dict, Any, Optional
+from typing import Any, Callable, Dict, List, Optional
 from pathlib import Path
 import re
 
@@ -22,7 +22,23 @@ for _stream in (sys.stdout, sys.stderr):
         _stream.reconfigure(errors="replace")
 
 # Описание коллекции: видно в базе, помогает понять, что за данные внутри.
-COLLECTION_META = {"description": "Векторная база исследований для RAG"}
+COLLECTION_META = {"description": "Векторная база знаний агента"}
+
+# Имя коллекции внутри базы агента: у каждого агента своя папка db/.
+BOOKS_COLLECTION = "books"
+
+# Модель эмбеддингов одна на процесс: агентов может быть много, а модель
+# тяжёлая — грузим её при первом обращении и переиспользуем.
+MODELS: Dict[str, Any] = {}
+
+
+def embedding_model_for(name: str):
+    """Локальная модель эмбеддингов (общая для всех агентов)."""
+    if name not in MODELS:
+        print(f"🔄 Загружаю модель эмбеддингов: {name}")
+        MODELS[name] = SentenceTransformer(name)
+        print("✅ Модель эмбеддингов загружена")
+    return MODELS[name]
 
 # Надбавка фрагменту, в котором совпали все слова вопроса. Больше любой суммы
 # мест RRF (места дают в лучшем случае 1/60 + 0,6/60), поэтому полное
@@ -68,42 +84,69 @@ class RAGDatabase:
                  chunk_size: int = 1000,
                  chunk_overlap: int = 200,
                  formats: Optional[List[str]] = None,
-                 ocr: str = "auto"):
-        """Открывает базу и загружает модель эмбеддингов.
+                 ocr: str = "auto",
+                 embedding_model_instance: Any | None = None,
+                 progress: Optional[Callable[[Dict[str, Any]], None]] = None):
+        """Открывает базу агента.
 
         Args:
-            db_path: путь к папке ChromaDB
+            db_path: папка базы агента (агент/база, обычно agents/<имя>/db)
             collection_name: имя коллекции внутри базы
-            embedding_model: локальная модель эмбеддингов
+            embedding_model: имя локальной модели эмбеддингов
             chunk_size: размер фрагмента в символах
             chunk_overlap: перекрытие соседних фрагментов
             formats: расширения файлов, которые читаем из папки с книгами
             ocr: "auto" — распознавать страницы-картинки (нужен tesseract),
                  "off" — не распознавать
+            embedding_model_instance: уже загруженная модель (общая на процесс)
+            progress: куда сообщать о ходе индексации (для интерфейса)
         """
         self.db_path = db_path
         self.collection_name = collection_name
         self.embedding_model_name = embedding_model
+        self._embedding_model = embedding_model_instance
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
         self.formats = [suffix.lower() for suffix in (formats or parsers.SUPPORTED)]
         self.tesseract = None if ocr == "off" else parsers.Tesseract()
         if self.tesseract is not None and not self.tesseract.available:
             self.tesseract = None
+        self.progress = progress
 
+        Path(db_path).mkdir(parents=True, exist_ok=True)
         self.client = chromadb.PersistentClient(path=db_path)
-
-        print(f"🔄 Загружаю модель эмбеддингов: {embedding_model}")
-        self.embedding_model = SentenceTransformer(embedding_model)
-        print("✅ Модель эмбеддингов загружена")
 
         # Коллекция открывается или создаётся — отдельный случай «уже есть»
         # не нужен: get_or_create сам вернёт существующую.
         self.collection = self.client.get_or_create_collection(
             name=collection_name, metadata=COLLECTION_META,
         )
-        print(f"✅ Коллекция «{collection_name}» готова: "
+        print(f"✅ База «{Path(db_path).name}» готова: "
               f"{self.collection.count()} фрагментов")
+
+    @property
+    def embedding_model(self):
+        """Модель эмбеддингов: грузится при первом обращении, одна на процесс."""
+        if getattr(self, "_embedding_model", None) is None:
+            self._embedding_model = embedding_model_for(self.embedding_model_name)
+        return self._embedding_model
+
+    @embedding_model.setter
+    def embedding_model(self, value) -> None:
+        self._embedding_model = value
+
+    def _report(self, **event: Any) -> None:
+        """Сообщает о ходе индексации: веб-слой показывает это в интерфейсе."""
+        reporter = getattr(self, "progress", None)
+        if reporter is not None:
+            reporter(event)
+
+    def close(self) -> None:
+        """Закрывает базу: освобождает файлы (нужно перед удалением папки)."""
+        try:
+            self.client.close()
+        except Exception as exc:  # уже закрыта или закрыть нечем
+            print(f"не удалось закрыть базу {self.db_path}: {exc}")
 
     def iter_sections(self, file_path: str):
         """Текст документа по частям: страница PDF, глава EPUB, часть TXT.
@@ -162,6 +205,7 @@ class RAGDatabase:
             )
             saved += len(chunks)
             print(f"  💾 Сохранено фрагментов: {saved}", flush=True)
+            self._report(event="chunks", source=source, saved=saved)
             chunks.clear()
             metadatas.clear()
 
@@ -197,6 +241,31 @@ class RAGDatabase:
             {"source": source}, {"chunk_id": {"$gte": saved}}
         ]})
         print(f"✅ {source} добавлен: {saved} фрагментов")
+        self._report(event="file_done", source=source, chunks=saved)
+
+    def delete_source(self, source: str) -> int:
+        """Убирает из базы все фрагменты файла: сколько их было, столько вернёт."""
+        found = self.collection.get(where={"source": source}, include=["metadatas"])
+        count = len(found.get("metadatas") or [])
+        if count:
+            self.collection.delete(where={"source": source})
+        return count
+
+    def source_counts(self) -> Dict[str, int]:
+        """Сколько фрагментов в базе по каждому файлу (один проход)."""
+        counts: Dict[str, int] = {}
+        for meta in self.collection.get(include=["metadatas"]).get("metadatas") or []:
+            name = (meta or {}).get("source", "неизвестно")
+            counts[name] = counts.get(name, 0) + 1
+        return counts
+
+    def clear_base(self) -> int:
+        """Стирает базу целиком: книги на диске остаются; вернёт число фрагментов."""
+        count = self.collection.count()
+        self.client.delete_collection(self.collection_name)
+        self.collection = self.client.create_collection(
+            name=self.collection_name, metadata=COLLECTION_META)
+        return count
 
     @staticmethod
     def _resolve_folder(folder: str) -> Path:
@@ -210,15 +279,20 @@ class RAGDatabase:
                 return child
         return path
 
-    def process_research_folder(self, research_folder: str = "./research"):
+    def process_research_folder(self, books_folder: str = "./books",
+                                progress: Optional[Callable[[Dict[str, Any]], None]] = None):
         """Индексирует все поддерживаемые файлы в папке (и в подпапках).
 
         Args:
-            research_folder: Путь к папке с книгами (PDF, EPUB, TXT, FB2)
+            books_folder: Путь к папке с книгами агента (PDF, EPUB, TXT, FB2)
+            progress: куда сообщать о ходе работы (интерфейс показывает это)
         """
-        research_path = self._resolve_folder(research_folder)
+        if progress is not None:
+            self.progress = progress
+        research_path = self._resolve_folder(books_folder)
         if not research_path.exists():
-            print(f"❌ Папка {research_folder} не найдена")
+            print(f"❌ Папка {books_folder} не найдена")
+            self._report(event="error", message=f"Папка {books_folder} не найдена")
             return False
 
         files, skipped = [], []
@@ -230,8 +304,10 @@ class RAGDatabase:
             else:
                 skipped.append(path)
         if not files:
-            print(f"❌ Книги не найдены в {research_folder} "
+            print(f"❌ Книги не найдены в {books_folder} "
                   f"(поддерживаются: {', '.join(self.formats)})")
+            self._report(event="error",
+                         message="В папке агента нет книг, которые можно прочитать")
             return False
 
         print(f"🔍 Найдено файлов: {len(files)} "
@@ -242,12 +318,14 @@ class RAGDatabase:
         if self.tesseract is not None:
             print("🔎 Страницы без текста будут распознаны через tesseract "
                   "(это самая долгая часть)")
+        self._report(event="files", total=len(files), skipped=len(skipped))
 
         successful_files = 0
         failed_files = []
 
         for i, file_path in enumerate(files, 1):
             print(f"\n📋 Обрабатываю файл {i}/{len(files)}: {file_path.name}")
+            self._report(event="file", source=file_path.name, index=i, total=len(files))
 
             try:
                 _set_alarm(300)  # ограничение времени на файл, только для UNIX
@@ -260,10 +338,12 @@ class RAGDatabase:
             except TimeoutError:
                 print(f"⏰ Превышен лимит времени для {file_path.name}")
                 failed_files.append((file_path.name, "Таймаут"))
+                self._report(event="failed", source=file_path.name, message="Таймаут")
 
             except Exception as e:
                 print(f"❌ Ошибка обработки {file_path.name}: {e}")
                 failed_files.append((file_path.name, str(e)))
+                self._report(event="failed", source=file_path.name, message=str(e))
 
         # Итоговая статистика
         print("\n🎉 Обработка завершена!")
@@ -276,6 +356,8 @@ class RAGDatabase:
 
         total_docs = self.collection.count()
         print(f"📊 Всего документов в базе: {total_docs}")
+        self._report(event="done", chunks=total_docs, files=len(files),
+                     failed=len(failed_files), added=successful_files)
 
         return successful_files > 0
 
@@ -518,31 +600,53 @@ class RAGDatabase:
         }
 
 
-def main():
-    """Пересобирает базу из папки с книгами: python -m core.database.
-
-    Папка берётся из config.yaml (store.research_folder). Повторный запуск
-    обновляет уже проиндексированные файлы, а не добавляет их заново.
-    """
-    from config import load_config
-
-    cfg = load_config()
-    print(f"🚀 Собираю базу «{cfg.store.collection}» из {cfg.store.research_folder}")
-    rag_db = RAGDatabase(
-        db_path=cfg.store.db_path,
-        collection_name=cfg.store.collection,
+def build_agent_database(cfg, agent, model):
+    """Открывает базу агента для индексации (модель эмбеддингов — общая)."""
+    db = RAGDatabase(
+        db_path=str(agent.db_dir),
+        collection_name=BOOKS_COLLECTION,
         embedding_model=cfg.embeddings.model,
         chunk_size=cfg.store.chunk_size,
         chunk_overlap=cfg.store.chunk_overlap,
         formats=cfg.store.formats,
         ocr=cfg.store.ocr,
+        embedding_model_instance=model,
     )
-    rag_db.process_research_folder(cfg.store.research_folder)
+    db.lexical = cfg.search.lexical
+    return db
 
-    stats = rag_db.get_database_stats()
-    print(f"\n📊 В базе {stats['total_chunks']} фрагментов "
-          f"из {stats['sources_count']} файлов")
-    return 0 if stats['total_chunks'] else 1
+
+def main(argv: Optional[List[str]] = None):
+    """Индексирует агентов из консоли: python -m core.database [агент ...].
+
+    Без аргументов индексирует всех агентов по очереди. Повторный запуск
+    обновляет уже проиндексированные книги, а не добавляет их заново.
+    Обычно это не нужно: то же самое делает кнопка «Индексировать» в ⚙.
+    """
+    from config import load_config
+    from core.agents import Agents
+
+    cfg = load_config()
+    agents = Agents(cfg.store.agents_root)
+    slugs = list(sys.argv[1:] if argv is None else argv)
+    if not slugs:
+        slugs = [agent.slug for agent in agents.list()]
+    if not slugs:
+        print(f"❌ В {cfg.store.agents_root} нет ни одного агента — создайте его в ⚙")
+        return 1
+
+    model = embedding_model_for(cfg.embeddings.model)
+    ok = True
+    for slug in slugs:
+        agent = agents.get(slug)
+        print(f"\n🚀 Агент «{agent.title}» ({slug}): {agent.books_dir}")
+        rag_db = build_agent_database(cfg, agent, model)
+        ok = rag_db.process_research_folder(str(agent.books_dir)) and ok
+        stats = rag_db.get_database_stats()
+        print(f"📊 В базе {stats['total_chunks']} фрагментов "
+              f"из {stats['sources_count']} файлов")
+        rag_db.close()
+    return 0 if ok else 1
 
 
 if __name__ == "__main__":

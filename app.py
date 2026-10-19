@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Веб-оболочка RAG-ассистента: FastAPI + статический чат (PWA).
+"""Веб-оболочка RAG-ассистента: FastAPI, чат (PWA) и админка агентов.
 
 Запуск:
     python app.py
 Затем откройте http://localhost:8000 (с телефона — http://<IP-ПК>:8000).
+Агенты, книги и модель — кнопка ⚙ в правом верхнем углу.
 """
 
 from __future__ import annotations
@@ -15,13 +16,16 @@ import sys
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any, Dict, Optional, Tuple
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from config import Config, load_config, resolve_llm
+from core.agents import Agent, AgentError, AgentNotFound, Agents
+from core.jobs import Jobs
 from core.llm import LLMError, OpenAICompatClient
 from core.models import forget_models, provider_models
 from core.providers import (
@@ -31,7 +35,7 @@ from core.providers import (
     provider_catalog,
     save_secret,
 )
-from core.store import VectorStore
+from core.store import StoreRegistry, VectorStore
 
 for _stream in (sys.stdout, sys.stderr):
     if hasattr(_stream, "reconfigure"):
@@ -40,7 +44,12 @@ for _stream in (sys.stdout, sys.stderr):
 WEB_DIR = Path(__file__).resolve().parent / "web"
 LOG_DIR = Path(__file__).resolve().parent / "logs"
 LAST_REQUEST = LOG_DIR / "last_request.json"
+UPLOAD_CHUNK = 1 << 20  # загружаем книги по мегабайту, а не целиком в память
+
 CONFIG: Config = load_config()
+AGENTS = Agents(CONFIG.store.agents_root)
+REGISTRY = StoreRegistry(CONFIG, AGENTS)
+JOBS = Jobs()
 
 
 def save_last_request(record: dict) -> None:
@@ -61,13 +70,56 @@ def sse(event: str, data) -> str:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
+def human_size(size: int) -> str:
+    """«1536» -> «1,5 КБ»: размеры в интерфейсе читаются глазом."""
+    value = float(size)
+    for unit in ("Б", "КБ", "МБ", "ГБ"):
+        if value < 1024 or unit == "ГБ":
+            return f"{value:.0f} {unit}" if unit == "Б" else f"{value:.1f} {unit}"
+        value /= 1024
+    return f"{value:.1f} ГБ"
+
+
+def http_error(exc: AgentError) -> HTTPException:
+    """Ошибки агентов: «нет такого» — 404, остальное — просьба исправить ввод."""
+    if isinstance(exc, AgentNotFound):
+        return HTTPException(status_code=404, detail=str(exc))
+    return HTTPException(status_code=400, detail=str(exc))
+
+
+def agent_store(slug: Optional[str]) -> Tuple[Agent, VectorStore]:
+    """Агент и его база: slug из запроса, иначе первый по алфавиту.
+
+    Нет агентов или нет такого агента — это ошибка запроса (404), а не сбой
+    сервера: интерфейс показывает её текстом.
+    """
+    if not slug:
+        found = AGENTS.list()
+        if not found:
+            raise HTTPException(
+                status_code=404,
+                detail="Агентов пока нет. Нажмите ⚙ в правом верхнем углу и создайте первого.")
+        slug = found[0].slug
+    try:
+        agent = AGENTS.get(slug)
+        return agent, REGISTRY.get(agent.slug)
+    except AgentError as exc:
+        raise http_error(exc) from exc
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    print(f"Загружаю RAG-ядро (коллекция «{CONFIG.store.collection}»)...")
-    app.state.store = await asyncio.to_thread(VectorStore, CONFIG)
     app.state.clients = {}  # (provider, model) -> OpenAICompatClient
-    stats = app.state.store.stats()
-    print(f"Готово: {stats['total_chunks']} фрагментов, источников: {stats['sources_count']}")
+    known = AGENTS.list()
+    if known:
+        print(f"Агентов: {len(known)} ({', '.join(agent.title for agent in known)})")
+        await asyncio.to_thread(REGISTRY.ensure_model)
+        agent, store = agent_store(known[0].slug)
+        stats = store.stats()
+        print(f"«{agent.title}»: {stats['total_chunks']} фрагментов, "
+              f"{stats['sources_count']} книг")
+    else:
+        print("Агентов пока нет — создайте первого в настройках (⚙)")
     print(f"Модель по умолчанию: {CONFIG.llm.model} ({CONFIG.llm.provider})")
     print(f"Открой http://localhost:{CONFIG.server.port}")
     try:
@@ -75,6 +127,7 @@ async def lifespan(app: FastAPI):
     finally:
         for client in app.state.clients.values():
             await client.aclose()
+        REGISTRY.close()
 
 
 app = FastAPI(title="RAG Ассистент", lifespan=lifespan)
@@ -90,16 +143,23 @@ class ChatRequest(BaseModel):
     history: list[ChatMessage] = Field(default_factory=list)
     provider: str | None = None
     model: str | None = None
+    agent: str | None = None
 
 
 class SearchRequest(BaseModel):
     query: str
     n_results: int | None = None
+    agent: str | None = None
 
 
 class KeyRequest(BaseModel):
     provider: str
     key: str = ""
+
+
+class AgentRequest(BaseModel):
+    title: str
+    description: str = ""
 
 
 def get_client(app: FastAPI, provider: str, model: str) -> OpenAICompatClient:
@@ -134,12 +194,19 @@ def build_messages(req: ChatRequest, context: str) -> list[dict]:
 
 async def stream_chat(req: ChatRequest, app: FastAPI):
     """Генератор SSE-событий: проверка модели → поиск → источники → ответ."""
-    store: VectorStore = app.state.store
     provider = req.provider or CONFIG.llm.provider
     model = req.model or CONFIG.llm.model
 
     if needs_key(provider) and not key_for(provider):
-        yield sse("error", {"message": f"Для «{provider}» нужен API-ключ. Введите его кнопкой 🔑 в шапке."})
+        yield sse("error", {"message": f"Для «{provider}» нужен API-ключ. "
+                                      f"Введите его в настройках (⚙ → Модели)."})
+        yield sse("done", {})
+        return
+
+    try:
+        agent, store = agent_store(req.agent)
+    except HTTPException as exc:
+        yield sse("error", {"message": exc.detail})
         yield sse("done", {})
         return
 
@@ -158,13 +225,15 @@ async def stream_chat(req: ChatRequest, app: FastAPI):
         yield sse("done", {})
         return
 
-    yield sse("model", {"provider": provider, "model": model})
+    yield sse("model", {"provider": provider, "model": model,
+                        "agent": agent.title, "slug": agent.slug})
 
     found = store.sources(results) if results else []
-    print(f"❓ {req.message}  ({provider}/{model}, фрагментов {len(results)}, "
-          f"контекст {len(context)} символов)", flush=True)
+    print(f"❓ [{agent.slug}] {req.message}  ({provider}/{model}, "
+          f"фрагментов {len(results)}, контекст {len(context)} символов)", flush=True)
     record = {
         "время": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "агент": agent.title,
         "провайдер": provider,
         "модель": model,
         "вопрос": req.message,
@@ -178,7 +247,8 @@ async def stream_chat(req: ChatRequest, app: FastAPI):
     if results:
         yield sse("sources", found)
     elif CONFIG.search.require_context:
-        yield sse("token", {"text": "В базе не найдено фрагментов для ответа на этот вопрос."})
+        yield sse("token", {"text": "В базе этого агента не найдено фрагментов "
+                                    "для ответа на этот вопрос."})
         yield sse("done", {})
         return
 
@@ -204,15 +274,19 @@ async def chat(req: ChatRequest, request: Request):
 
 
 @app.post("/api/search")
-async def search(req: SearchRequest, request: Request):
-    store = request.app.state.store
+async def search(req: SearchRequest):
+    _, store = agent_store(req.agent)
     results = await asyncio.to_thread(store.search, req.query, req.n_results)
     return {"results": store.sources(results)}
 
 
 @app.get("/api/stats")
-async def stats(request: Request):
-    return request.app.state.store.stats()
+async def stats(agent: str | None = None):
+    found, store = agent_store(agent)
+    data = await asyncio.to_thread(store.stats)
+    data["agent"] = found.as_dict()
+    data["books"] = len(AGENTS.books(found.slug))
+    return data
 
 
 @app.get("/api/config")
@@ -220,7 +294,7 @@ async def config():
     return {
         "provider": CONFIG.llm.provider,
         "model": CONFIG.llm.model,
-        "collection": CONFIG.store.collection,
+        "agents_root": CONFIG.store.agents_root,
         "embedding_model": CONFIG.embeddings.model,
     }
 
@@ -254,6 +328,155 @@ async def models(provider: str | None = None, all: int = 0):
         return {"provider": name, "label": name, "models": [], "source": "fallback",
                 "configured": True, "error": "нет реестра моделей"}
     return await provider_models(name, CONFIG)
+
+
+# --- Агенты: своя папка, свои книги, своя база ------------------------------
+
+@app.get("/api/agents")
+async def list_agents():
+    """Агенты для интерфейса: книги, фрагменты, размер папки."""
+    out: list[Dict[str, Any]] = []
+    for agent in AGENTS.list():
+        info = agent.as_dict()
+        info["books"] = len(AGENTS.books(agent.slug))
+        info["size"] = await asyncio.to_thread(agent.size)
+        info["size_text"] = human_size(info["size"])
+        try:
+            data = await asyncio.to_thread(REGISTRY.get(agent.slug).stats)
+            info["chunks"] = data["total_chunks"]
+            info["indexed"] = data["sources_count"]
+        except Exception as exc:  # база не открылась — покажем причину
+            info["chunks"] = 0
+            info["indexed"] = 0
+            info["error"] = str(exc)
+        out.append(info)
+    return {"agents": out}
+
+
+@app.post("/api/agents")
+async def create_agent(req: AgentRequest):
+    try:
+        agent = await asyncio.to_thread(AGENTS.create, req.title, req.description)
+    except AgentError as exc:
+        raise http_error(exc) from exc
+    return agent.as_dict()
+
+
+@app.patch("/api/agents/{slug}")
+async def rename_agent(slug: str, req: AgentRequest):
+    try:
+        agent = await asyncio.to_thread(AGENTS.rename, slug, req.title)
+    except AgentError as exc:
+        raise http_error(exc) from exc
+    return agent.as_dict()
+
+
+@app.delete("/api/agents/{slug}")
+async def delete_agent(slug: str):
+    try:
+        AGENTS.get(slug)
+        await asyncio.to_thread(REGISTRY.forget, slug)  # закрыть базу агента
+        await asyncio.to_thread(AGENTS.delete, slug)
+    except AgentError as exc:
+        raise http_error(exc) from exc
+    return {"ok": True}
+
+
+@app.get("/api/agents/{slug}/books")
+async def list_books(slug: str):
+    """Книги агента и сколько фрагментов каждой уже в базе."""
+    try:
+        agent = AGENTS.get(slug)
+        counts = await asyncio.to_thread(REGISTRY.get(slug).source_counts)
+    except AgentError as exc:
+        raise http_error(exc) from exc
+    books = await asyncio.to_thread(AGENTS.books, slug)
+    for book in books:
+        book["chunks"] = counts.get(book["name"], 0)
+        book["size_text"] = human_size(book["size"])
+    return {"slug": slug, "title": agent.title, "books": books,
+            "chunks": sum(counts.values()),
+            "indexed": len(counts)}
+
+
+@app.post("/api/agents/{slug}/books")
+async def upload_books(slug: str, files: list[UploadFile] = File(...)):
+    """Загружает книги в папку агента (файл пишется по частям, не в память)."""
+    uploaded: list[Dict[str, Any]] = []
+    failed: list[Dict[str, Any]] = []
+    for upload in files:
+        name = Path(upload.filename or "").name
+        try:
+            reader = iter(lambda: upload.file.read(UPLOAD_CHUNK), b"")
+            info = await asyncio.to_thread(AGENTS.write_book, slug, name, reader)
+            uploaded.append(info)
+        except (AgentError, OSError) as exc:
+            failed.append({"name": name, "error": str(exc)})
+        finally:
+            await upload.close()
+    return {"uploaded": uploaded, "failed": failed}
+
+
+@app.delete("/api/agents/{slug}/books/{name}")
+async def delete_book(slug: str, name: str):
+    """Удаляет книгу: сначала фрагменты из базы, потом сам файл."""
+    try:
+        removed = await asyncio.to_thread(REGISTRY.get(slug).delete_source, name)
+        gone = await asyncio.to_thread(AGENTS.remove_book, slug, name)
+    except AgentError as exc:
+        raise http_error(exc) from exc
+    if not gone:
+        raise HTTPException(status_code=404, detail=f"Файла «{name}» нет")
+    return {"ok": True, "removed": removed}
+
+
+@app.post("/api/agents/{slug}/index")
+async def index_agent(slug: str):
+    """Запускает индексацию в фоне: интерфейс следит за ходом через /job."""
+    try:
+        agent = AGENTS.get(slug)
+    except AgentError as exc:
+        raise http_error(exc) from exc
+
+    running = JOBS.latest(slug)
+    if running is not None and running.state == "running":
+        return {"job": running.as_dict()}
+
+    job = JOBS.start(slug)
+
+    def run() -> None:
+        try:
+            store = REGISTRY.get(slug)
+            done = store.index(str(agent.books_dir),
+                               progress=lambda event: JOBS.apply(job, event))
+            if not done and job.state == "running":
+                JOBS.fail(job, "Ни одну книгу не удалось прочитать")
+        except Exception as exc:  # база не открылась, файл не прочитался и т.п.
+            JOBS.fail(job, str(exc))
+
+    asyncio.create_task(asyncio.to_thread(run))
+    return {"job": job.as_dict()}
+
+
+@app.get("/api/agents/{slug}/job")
+async def job_status(slug: str):
+    """Ход последней индексации агента (интерфейс спрашивает раз в секунду)."""
+    try:
+        AGENTS.get(slug)
+    except AgentError as exc:
+        raise http_error(exc) from exc
+    job = JOBS.latest(slug)
+    return {"job": job.as_dict() if job else None}
+
+
+@app.delete("/api/agents/{slug}/base")
+async def clear_base(slug: str):
+    """Очищает базу агента; книги на диске остаются."""
+    try:
+        removed = await asyncio.to_thread(REGISTRY.get(slug).clear)
+    except AgentError as exc:
+        raise http_error(exc) from exc
+    return {"ok": True, "removed": removed}
 
 
 # Статика (index.html, app.js, PWA) — монтируется последней, чтобы

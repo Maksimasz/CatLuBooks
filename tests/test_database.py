@@ -184,16 +184,82 @@ class InitTests(unittest.TestCase):
     def test_collection_is_opened_or_created_with_description(self):
         client = Mock()
         collection = client.get_or_create_collection.return_value
-        with patch.object(module.chromadb, "PersistentClient",
-                          return_value=client, create=True):
-            with contextlib.redirect_stdout(io.StringIO()):
-                db = module.RAGDatabase(db_path=":memory:", collection_name="книги",
-                                        embedding_model="test", ocr="off")
+        with tempfile.TemporaryDirectory() as folder:
+            with patch.object(module.chromadb, "PersistentClient",
+                              return_value=client, create=True):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    db = module.RAGDatabase(db_path=folder, collection_name="книги",
+                                            embedding_model="test", ocr="off")
 
         self.assertIs(db.collection, collection)
         self.assertIsNone(db.tesseract)  # ocr: off — распознавание не поднимаем
         client.get_or_create_collection.assert_called_once_with(
             name="книги", metadata=module.COLLECTION_META)
+
+    def test_shared_embedding_model_is_reused_without_loading(self):
+        """Модель, загруженную для другого агента, повторно не грузим."""
+        model = Mock()
+        client = Mock()
+        with tempfile.TemporaryDirectory() as folder:
+            with patch.object(module.chromadb, "PersistentClient",
+                              return_value=client, create=True):
+                with patch.object(module, "SentenceTransformer") as loader:
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        db = module.RAGDatabase(
+                            db_path=folder, collection_name="книги",
+                            embedding_model="test", ocr="off",
+                            embedding_model_instance=model)
+                    self.assertIs(db.embedding_model, model)
+                    loader.assert_not_called()
+
+    def test_embedding_model_loads_once_for_everyone(self):
+        """Модель эмбеддингов одна на процесс: второй агент её не перезагружает."""
+        client = Mock()
+        module.MODELS.clear()
+        with tempfile.TemporaryDirectory() as folder:
+            with patch.object(module.chromadb, "PersistentClient",
+                              return_value=client, create=True):
+                with patch.object(module, "SentenceTransformer") as loader:
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        first = module.RAGDatabase(
+                            db_path=folder, collection_name="книги",
+                            embedding_model="test", ocr="off")
+                        second = module.RAGDatabase(
+                            db_path=folder, collection_name="книги",
+                            embedding_model="test", ocr="off")
+                        self.assertIs(first.embedding_model, second.embedding_model)
+                    loader.assert_called_once_with("test")
+        module.MODELS.clear()
+
+    def test_base_can_be_cleared_and_source_deleted(self):
+        client = Mock()
+        collection = client.get_or_create_collection.return_value
+        collection.count.return_value = 12
+        collection.get.return_value = {"metadatas": [{"source": "книга.pdf"}] * 7}
+        with tempfile.TemporaryDirectory() as folder:
+            with patch.object(module.chromadb, "PersistentClient",
+                              return_value=client, create=True):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    db = module.RAGDatabase(db_path=folder, collection_name="книги",
+                                            embedding_model="test", ocr="off")
+
+        self.assertEqual(db.delete_source("книга.pdf"), 7)
+        collection.delete.assert_called_once_with(where={"source": "книга.pdf"})
+
+        self.assertEqual(db.clear_base(), 12)
+        client.delete_collection.assert_called_once_with("книги")
+        client.create_collection.assert_called_once_with(
+            name="книги", metadata=module.COLLECTION_META)
+
+    def test_source_counts_groups_chunks_by_file(self):
+        self.db = module.RAGDatabase.__new__(module.RAGDatabase)
+        self.db.collection = Mock()
+        self.db.collection.get.return_value = {"metadatas": [
+            {"source": "Плов.pdf"}, {"source": "Плов.pdf"}, {"source": "Борщ.pdf"},
+            {},
+        ]}
+        self.assertEqual(self.db.source_counts(),
+                         {"Плов.pdf": 2, "Борщ.pdf": 1, "неизвестно": 1})
 
 
 class FolderTests(unittest.TestCase):
@@ -230,6 +296,24 @@ class FolderTests(unittest.TestCase):
             result = self.db.process_research_folder(self.temp.name)
         self.assertFalse(result)
         self.assertIn('не найдены', output.getvalue())
+
+    def test_progress_reports_every_file_and_finish(self):
+        """Ход индексации уходит в интерфейс: файлы, текущий файл, итог."""
+        for name in ('а.txt', 'б.txt'):
+            Path(self.temp.name, name).write_bytes(b'x')
+        self.db.add_file_to_database = Mock()
+        self.db.collection.count.return_value = 42
+        events = []
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = self.db.process_research_folder(
+                self.temp.name, progress=events.append)
+
+        self.assertTrue(result)
+        self.assertEqual([event['event'] for event in events],
+                         ['files', 'file', 'file', 'done'])
+        self.assertEqual(events[0]['total'], 2)
+        self.assertEqual(events[1]['source'], 'а.txt')
+        self.assertEqual(events[-1]['chunks'], 42)
 
 
 if __name__ == '__main__':

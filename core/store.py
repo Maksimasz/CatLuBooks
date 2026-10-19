@@ -1,33 +1,27 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Обёртка над векторным хранилищем.
+"""Хранилище знаний агента.
 
-Изолирует приложение от конкретной реализации (сейчас — ChromaDB
-через RAGDatabase). Чтобы сменить базу или движок поиска, достаточно
-переписать этот класс, не трогая веб-слой.
+VectorStore — поиск по базе одного агента: веб-слой не знает, что внутри
+ChromaDB. StoreRegistry открывает базы агентов по требованию; модель
+эмбеддингов грузится один раз на процесс и переиспользуется всеми агентами.
 """
 
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any, Callable, Dict, List, Optional
 
 from config import Config
-from core.database import RAGDatabase
+from core.agents import Agents
+from core.database import BOOKS_COLLECTION, RAGDatabase, embedding_model_for
 
 
 class VectorStore:
-    def __init__(self, cfg: Config):
+    """База одного агента: поиск, контекст для модели, статистика."""
+
+    def __init__(self, cfg: Config, db: RAGDatabase):
         self.cfg = cfg
-        self._db = RAGDatabase(
-            db_path=cfg.store.db_path,
-            collection_name=cfg.store.collection,
-            embedding_model=cfg.embeddings.model,
-            chunk_size=cfg.store.chunk_size,
-            chunk_overlap=cfg.store.chunk_overlap,
-            formats=cfg.store.formats,
-            ocr=cfg.store.ocr,
-        )
-        self._db.lexical = cfg.search.lexical
+        self._db = db
 
     def search(self, query: str, n_results: int | None = None) -> List[Dict[str, Any]]:
         """Поиск с расширением контекста соседними фрагментами."""
@@ -87,3 +81,65 @@ class VectorStore:
 
     def stats(self) -> Dict[str, Any]:
         return self._db.get_database_stats()
+
+    def source_counts(self) -> Dict[str, int]:
+        """Сколько фрагментов в базе по каждой книге."""
+        return self._db.source_counts()
+
+    def index(self, books_folder: str,
+              progress: Optional[Callable[[Dict[str, Any]], None]] = None) -> bool:
+        """Индексирует книги агента (запускается фоновой задачей)."""
+        return self._db.process_research_folder(books_folder, progress=progress)
+
+    def delete_source(self, name: str) -> int:
+        """Убирает из базы фрагменты книги; файл на диске не трогает."""
+        return self._db.delete_source(name)
+
+    def clear(self) -> int:
+        """Стирает базу агента: книги на диске остаются."""
+        return self._db.clear_base()
+
+    def close(self) -> None:
+        self._db.close()
+
+
+class StoreRegistry:
+    """Базы агентов по требованию: одному агенту — одна открытая база."""
+
+    def __init__(self, cfg: Config, agents: Agents):
+        self.cfg = cfg
+        self.agents = agents
+        self._stores: Dict[str, VectorStore] = {}
+
+    def get(self, slug: str) -> VectorStore:
+        """Открывает базу агента (и создаёт пустую, если её ещё нет)."""
+        store = self._stores.get(slug)
+        if store is None:
+            agent = self.agents.get(slug)  # AgentError, если агента нет
+            db = RAGDatabase(
+                db_path=str(agent.db_dir),
+                collection_name=BOOKS_COLLECTION,
+                embedding_model=self.cfg.embeddings.model,
+                chunk_size=self.cfg.store.chunk_size,
+                chunk_overlap=self.cfg.store.chunk_overlap,
+                formats=self.cfg.store.formats,
+                ocr=self.cfg.store.ocr,
+            )
+            db.lexical = self.cfg.search.lexical
+            store = VectorStore(self.cfg, db)
+            self._stores[slug] = store
+        return store
+
+    def ensure_model(self):
+        """Заранее грузит модель эмбеддингов: первый вопрос не будет ждать."""
+        return embedding_model_for(self.cfg.embeddings.model)
+
+    def forget(self, slug: str) -> None:
+        """Закрывает базу агента — нужно перед удалением его папки."""
+        store = self._stores.pop(slug, None)
+        if store is not None:
+            store.close()
+
+    def close(self) -> None:
+        for slug in list(self._stores):
+            self.forget(slug)
