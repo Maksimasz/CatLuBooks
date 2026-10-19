@@ -167,29 +167,40 @@ class Agents:
 
     # --- книги ----------------------------------------------------------
     def books(self, slug: str) -> List[Dict[str, Any]]:
-        """Файлы в папке книг агента: имя, размер, читается ли формат."""
+        """Файлы в папке книг агента (и в подпапках): имя, размер, формат.
+
+        Имя — путь внутри папки книг («выпечка/плов.pdf»): так книга из
+        подпапки отличается от одноимённой в корне и её видно в интерфейсе —
+        иначе она попадала бы в базу, не показываясь в списке.
+        """
         agent = self.get(slug)
         if not agent.books_dir.is_dir():
             return []
         books = []
-        for path in sorted(agent.books_dir.iterdir()):
+        for path in sorted(agent.books_dir.rglob("*")):
             if not path.is_file() or path.name.endswith(".part"):
                 continue
             books.append({
-                "name": path.name,
+                "name": parsers.relative_name(path, agent.books_dir),
                 "size": path.stat().st_size,
                 "supported": path.suffix.lower() in parsers.SUPPORTED,
             })
         return books
 
     def book_path(self, slug: str, name: str) -> Path:
-        """Путь к книге внутри папки агента: чужие пути не принимаются."""
+        """Путь к книге внутри папки агента: чужие пути не принимаются.
+
+        Путь внутри папки разрешён («выпечка/плов.pdf»), выход за её пределы
+        и скрытые папки — нет.
+        """
         agent = self.get(slug)
-        raw = str(name or "").strip()
-        clean = Path(raw).name
-        if not raw or clean != raw or raw.startswith("."):
+        raw = str(name or "").strip().replace("\\", "/")
+        if raw.startswith("/") or Path(raw).is_absolute() or ":" in raw:
             raise AgentError(f"Недопустимое имя файла: {name!r}")
-        return agent.books_dir / clean
+        parts = [part for part in raw.split("/") if part]
+        if not parts or any(part in (".", "..") or part.startswith(".") for part in parts):
+            raise AgentError(f"Недопустимое имя файла: {name!r}")
+        return agent.books_dir.joinpath(*parts)
 
     def write_book(self, slug: str, name: str,
                    chunks: Iterable[bytes]) -> Dict[str, Any]:

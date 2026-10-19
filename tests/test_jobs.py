@@ -59,6 +59,29 @@ class JobTests(unittest.TestCase):
         self.assertEqual(job.as_dict()["skipped"], 1)
         self.assertTrue(any("скан.pdf" in line for line in job.as_dict()["log"]))
 
+    def test_ready_books_are_reported_and_not_counted_as_read(self):
+        """Готовые книги видны в итоге, но прочитанными не считаются."""
+        job = self.jobs.start("cooking")
+        self.jobs.apply(job, {"event": "ready", "total": 2,
+                              "sources": ["Плов.pdf", "Борщ.pdf"]})
+        self.jobs.apply(job, {"event": "files", "total": 1, "ready": 2})
+        self.jobs.apply(job, {"event": "done", "chunks": 1000, "files": 3,
+                              "failed": 0, "added": 1, "ready": 2})
+
+        data = job.as_dict()
+        self.assertEqual(data["ready"], 2)
+        self.assertEqual(data["added"], 1)
+        self.assertEqual(data["total"], 1)
+        self.assertTrue(any("уже в базе" in line for line in data["log"]))
+        self.assertIn("уже было 2", data["log"][-1])
+
+    def test_job_without_ready_books_says_nothing_about_them(self):
+        job = self.jobs.start("cooking")
+        self.jobs.apply(job, {"event": "done", "chunks": 10, "added": 1})
+
+        self.assertEqual(job.ready, 0)
+        self.assertNotIn("уже было", job.as_dict()["log"][-1])
+
     def test_error_event_marks_the_job_failed(self):
         job = self.jobs.start("cooking")
         self.jobs.apply(job, {"event": "error", "message": "в папке нет книг"})

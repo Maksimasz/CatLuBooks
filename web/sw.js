@@ -1,6 +1,6 @@
 // Оболочка приложения: сначала сеть, кэш — только когда сервер недоступен.
 // Так браузер всегда получает свежий интерфейс после обновления.
-const CACHE = "catlu-shell-v11";
+const CACHE = "catlu-shell-v14";
 const SHELL = ["/", "/index.html", "/style.css", "/app.js", "/manifest.webmanifest", "/icon-192.png"];
 
 self.addEventListener("install", (event) => {

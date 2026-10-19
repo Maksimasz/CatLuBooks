@@ -27,6 +27,9 @@ COLLECTION_META = {"description": "Векторная база знаний аг
 # Имя коллекции внутри базы агента: у каждого агента своя папка db/.
 BOOKS_COLLECTION = "books"
 
+# Фрагменты без имени книги: попадаются только в битых базах.
+UNKNOWN_SOURCE = "неизвестно"
+
 # Модель эмбеддингов одна на процесс: агентов может быть много, а модель
 # тяжёлая — грузим её при первом обращении и переиспользуем.
 MODELS: Dict[str, Any] = {}
@@ -187,16 +190,18 @@ class RAGDatabase:
         """Совместимый интерфейс для получения списка фрагментов."""
         return list(self.iter_text_chunks(text, chunk_size, overlap))
 
-    def add_file_to_database(self, file_path: str, metadata: Optional[Dict[str, Any]] = None):
+    def add_file_to_database(self, file_path: str, metadata: Optional[Dict[str, Any]] = None,
+                             source: Optional[str] = None):
         """Читает файл (PDF/EPUB/TXT/FB2) и сразу сохраняет порции по 32 фрагмента.
 
         При ошибке импорт прерывается; уже записанные порции остаются в базе.
         """
         path = Path(file_path)
         print(f"📄 Обрабатываю файл: {path.name}")
-        source = path.name
+        source = source or path.name
         unit = parsers.unit_for(path)
-        file_size = path.stat().st_size
+        file_stat = path.stat()
+        file_size = file_stat.st_size
         chunks = []
         metadatas = []
         saved = 0
@@ -238,6 +243,10 @@ class RAGDatabase:
                     "page": number,
                     "unit": unit,
                     "file_size": file_size,  # Размер файла в байтах.
+                    # Время изменения и был ли включён OCR: по ним видно,
+                    # нужно ли перечитывать книгу при следующей индексации.
+                    "file_mtime": file_stat.st_mtime_ns,
+                    "ocr": bool(self.tesseract is not None),
                 })
                 if len(chunks) == 32:
                     save_batch()
@@ -260,13 +269,32 @@ class RAGDatabase:
             self.collection.delete(where={"source": source})
         return count
 
+    def source_info(self) -> Dict[str, Dict[str, Any]]:
+        """Что известно о каждой книге в базе: фрагменты, размер, время, OCR.
+
+        Один проход по метаданным: по этой записи видно, изменилась ли книга
+        после индексации, — поэтому её достаточно, чтобы не читать заново то,
+        что уже прочитано.
+        """
+        info: Dict[str, Dict[str, Any]] = {}
+        found = self.collection.get(include=["metadatas"]).get("metadatas") or []
+        for meta in found:
+            meta = meta or {}
+            name = meta.get("source", UNKNOWN_SOURCE)
+            record = info.setdefault(
+                name, {"chunks": 0, "size": None, "mtime": None, "ocr": False})
+            record["chunks"] += 1
+            if record["size"] is None and meta.get("file_size") is not None:
+                record["size"] = meta["file_size"]
+            if record["mtime"] is None and meta.get("file_mtime") is not None:
+                record["mtime"] = meta["file_mtime"]
+            if meta.get("ocr"):
+                record["ocr"] = True
+        return info
+
     def source_counts(self) -> Dict[str, int]:
-        """Сколько фрагментов в базе по каждому файлу (один проход)."""
-        counts: Dict[str, int] = {}
-        for meta in self.collection.get(include=["metadatas"]).get("metadatas") or []:
-            name = (meta or {}).get("source", "неизвестно")
-            counts[name] = counts.get(name, 0) + 1
-        return counts
+        """Сколько фрагментов в базе по каждому файлу."""
+        return {name: record["chunks"] for name, record in self.source_info().items()}
 
     def clear_base(self) -> int:
         """Стирает базу целиком: книги на диске остаются; вернёт число фрагментов."""
@@ -288,13 +316,45 @@ class RAGDatabase:
                 return child
         return path
 
+    @staticmethod
+    def label_for(path: Path, root: Path) -> str:
+        """Как книга называется в базе: путь внутри папки агента."""
+        return parsers.relative_name(path, root)
+
+    def already_indexed(self, path: Path, info: Dict[str, Dict[str, Any]],
+                        root: Path) -> bool:
+        """Книга уже в базе и не изменилась — читать её снова не нужно.
+
+        Сравниваем размер и время изменения файла; для сканов проверяем ещё и
+        распознавание: скан, прочитанный при выключенном OCR, надо перечитать.
+        У фрагментов, попавших в базу раньше, времени изменения нет — там
+        решает размер, чтобы старые базы не перечитывались целиком.
+        """
+        record = info.get(self.label_for(path, root))
+        if not record or not record["chunks"]:
+            return False
+        try:
+            stamp = path.stat()
+        except OSError:
+            return False
+        if record["size"] is not None and record["size"] != stamp.st_size:
+            return False
+        if record["mtime"] is not None and record["mtime"] != stamp.st_mtime_ns:
+            return False
+        if self.tesseract is not None and not record["ocr"] \
+                and parsers.probe(path)["needs_ocr"]:
+            return False
+        return True
+
     def process_research_folder(self, books_folder: str = "./books",
-                                progress: Optional[Callable[[Dict[str, Any]], None]] = None):
-        """Индексирует все поддерживаемые файлы в папке (и в подпапках).
+                                progress: Optional[Callable[[Dict[str, Any]], None]] = None,
+                                full: bool = False):
+        """Индексирует файлы папки (и подпапок), пропуская уже готовые.
 
         Args:
             books_folder: Путь к папке с книгами агента (PDF, EPUB, TXT, FB2)
             progress: куда сообщать о ходе работы (интерфейс показывает это)
+            full: True — прочитать всё заново, даже если книги уже в базе
         """
         if progress is not None:
             self.progress = progress
@@ -324,31 +384,55 @@ class RAGDatabase:
         if skipped:
             print(f"⏭️ Пропускаю файлы, формат которых не читаю: "
                   f"{len(skipped)} ({', '.join(sorted({p.suffix.lower() for p in skipped}))})")
+
+        # Уже прочитанные книги, которые с тех пор не менялись, не перечитываем:
+        # добавление одной книги не должно занимать столько же, сколько всё.
+        info = {} if full else self.source_info()
+        ready = [self.label_for(path, research_path) for path in files
+                 if self.already_indexed(path, info, research_path)]
+        ready_names = set(ready)
+        todo = [path for path in files
+                if self.label_for(path, research_path) not in ready_names]
+        if ready:
+            print(f"⏭️ Уже в базе, читать заново не нужно: {len(ready)}")
+            for name in ready:
+                print(f"  - {name}")
+            self._report(event="ready", total=len(ready), sources=ready)
+        if not todo:
+            print("✅ Все книги уже в базе — читать нечего")
+            self._report(event="files", total=0, skipped=len(skipped), ready=len(ready))
+            self._report(event="done", chunks=self.collection.count(),
+                         files=len(files), failed=0, added=0,
+                         skipped=0, ready=len(ready))
+            return True
+
         if self.tesseract is not None:
             print("🔎 Страницы без текста будут распознаны через tesseract "
                   "(это самая долгая часть)")
-        self._report(event="files", total=len(files), skipped=len(skipped))
+        self._report(event="files", total=len(todo), skipped=len(skipped),
+                     ready=len(ready))
 
         successful_files = 0
         failed_files = []
         missing_files = []
 
-        for i, file_path in enumerate(files, 1):
-            print(f"\n📋 Обрабатываю файл {i}/{len(files)}: {file_path.name}")
-            self._report(event="file", source=file_path.name, index=i, total=len(files))
+        for i, file_path in enumerate(todo, 1):
+            label = self.label_for(file_path, research_path)
+            print(f"\n📋 Обрабатываю файл {i}/{len(todo)}: {label}")
+            self._report(event="file", source=label, index=i, total=len(todo))
 
             if not file_path.exists():
                 # Книгу убрали из папки, пока шла индексация: это не сбой,
                 # и в базу про неё ничего не попало.
-                print(f"⏭️ Файла больше нет: {file_path.name}")
-                missing_files.append(file_path.name)
-                self._report(event="skipped", source=file_path.name)
+                print(f"⏭️ Файла больше нет: {label}")
+                missing_files.append(label)
+                self._report(event="skipped", source=label)
                 continue
 
             try:
                 _set_alarm(300)  # ограничение времени на файл, только для UNIX
                 try:
-                    self.add_file_to_database(str(file_path))
+                    self.add_file_to_database(str(file_path), source=label)
                 finally:
                     _set_alarm(0)
                 successful_files += 1
@@ -365,7 +449,9 @@ class RAGDatabase:
 
         # Итоговая статистика
         print("\n🎉 Обработка завершена!")
-        print(f"✅ Успешно обработано файлов: {successful_files}/{len(files)}")
+        print(f"✅ Прочитано книг: {successful_files} из {len(todo)}")
+        if ready:
+            print(f"⏭️ Уже были в базе, не перечитывал: {len(ready)}")
 
         if failed_files:
             print(f"❌ Не удалось обработать {len(failed_files)} файлов:")
@@ -382,7 +468,7 @@ class RAGDatabase:
         print(f"📊 Всего документов в базе: {total_docs}")
         self._report(event="done", chunks=total_docs, files=len(files),
                      failed=len(failed_files), added=successful_files,
-                     skipped=len(missing_files))
+                     skipped=len(missing_files), ready=len(ready))
 
         return successful_files > 0
 

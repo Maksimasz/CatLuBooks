@@ -18,7 +18,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -26,6 +26,7 @@ from pydantic import BaseModel, Field
 from config import Config, load_config, resolve_llm, save_setting
 from core import ocr, parsers
 from core.agents import Agent, AgentError, AgentNotFound, Agents
+from core.database import UNKNOWN_SOURCE
 from core.jobs import Jobs
 from core.llm import LLMError, OpenAICompatClient
 from core.models import forget_models, provider_models
@@ -441,9 +442,22 @@ async def list_books(slug: str):
         book["chunks"] = counts.get(book["name"], 0)
         book["size_text"] = human_size(book["size"])
 
+    # Фрагменты книг, которых в папке больше нет (файл убрали мимо интерфейса):
+    # показываем их отдельными строками — иначе они молча занимают место и
+    # отвечают на вопросы, хотя книги уже нет.
+    present = {book["name"] for book in books}
+    for name in sorted(counts):
+        if name in present or name == UNKNOWN_SOURCE:
+            continue
+        books.append({"name": name, "size": 0, "size_text": "",
+                      "supported": True, "chunks": counts[name], "missing": True})
+
     def inspect(items: list[Dict[str, Any]]) -> list[Dict[str, Any]]:
         """Проверяет, есть ли в книге текст: скан без текста — повод для OCR."""
         for book in items:
+            if book.get("missing"):
+                book["needs_ocr"] = False
+                continue
             report = parsers.probe(agent.books_dir / book["name"])
             book["needs_ocr"] = report["needs_ocr"]
         return items
@@ -452,6 +466,7 @@ async def list_books(slug: str):
     return {"slug": slug, "title": agent.title, "books": books,
             "chunks": sum(counts.values()),
             "indexed": len(counts),
+            "missing": sum(1 for book in books if book.get("missing")),
             "needs_ocr": sum(1 for book in books if book["needs_ocr"])}
 
 
@@ -473,22 +488,29 @@ async def upload_books(slug: str, files: list[UploadFile] = File(...)):
     return {"uploaded": uploaded, "failed": failed}
 
 
-@app.delete("/api/agents/{slug}/books/{name}")
-async def delete_book(slug: str, name: str):
-    """Удаляет книгу: сначала фрагменты из базы, потом сам файл."""
+@app.delete("/api/agents/{slug}/book")
+async def delete_book(slug: str, name: str = Query(min_length=1)):
+    """Удаляет книгу: сначала фрагменты из базы, потом сам файл.
+
+    Имя приходит строкой запроса, а не частью адреса: так удаляется и книга
+    из подпапки, и фрагменты книги, файл которой уже убрали руками.
+    """
     try:
         removed = await asyncio.to_thread(REGISTRY.get(slug).delete_source, name)
         gone = await asyncio.to_thread(AGENTS.remove_book, slug, name)
     except AgentError as exc:
         raise http_error(exc) from exc
-    if not gone:
-        raise HTTPException(status_code=404, detail=f"Файла «{name}» нет")
-    return {"ok": True, "removed": removed}
+    if not gone and not removed:
+        raise HTTPException(status_code=404, detail=f"Книги «{name}» нет ни в базе, ни в папке")
+    return {"ok": True, "removed": removed, "file": gone}
 
 
 @app.post("/api/agents/{slug}/index")
-async def index_agent(slug: str):
-    """Запускает индексацию в фоне: интерфейс следит за ходом через /job."""
+async def index_agent(slug: str, full: bool = False):
+    """Запускает индексацию в фоне: интерфейс следит за ходом через /job.
+
+    Уже прочитанные книги пропускаются; full=true перечитывает всё заново.
+    """
     try:
         agent = AGENTS.get(slug)
     except AgentError as exc:
@@ -504,7 +526,8 @@ async def index_agent(slug: str):
         try:
             store = REGISTRY.get(slug)
             done = store.index(str(agent.books_dir),
-                               progress=lambda event: JOBS.apply(job, event))
+                               progress=lambda event: JOBS.apply(job, event),
+                               full=full)
             if not done and job.state == "running":
                 JOBS.fail(job, "Ни одну книгу не удалось прочитать")
         except Exception as exc:  # база не открылась, файл не прочитался и т.п.

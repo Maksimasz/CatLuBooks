@@ -20,6 +20,7 @@ const agentCreateEl = document.getElementById("agent-create");
 const agentListEl = document.getElementById("agent-list");
 const bookFilesEl = document.getElementById("book-files");
 const indexBtnEl = document.getElementById("index-btn");
+const reindexBtnEl = document.getElementById("reindex-btn");
 const jobEl = document.getElementById("job");
 const bookListEl = document.getElementById("book-list");
 const ocrToggleEl = document.getElementById("ocr-toggle");
@@ -51,8 +52,7 @@ let jobRunning = false;
 let indexRunning = false;        // у сервера уже идёт индексация
 let indexFile = "";              // какую книгу сервер читает прямо сейчас
 let jobTicks = 0;                // сколько раз спросили сервер (для редких обновлений списка)
-let bookCount = 0;               // сколько книг у активного агента
-let booksCache = [];             // книги активного агента: нужны подсказкам OCR
+let booksCache = [];             // книги активного агента: список и подсказки OCR
 let ocrLoaded = false;           // ответил ли сервер про tesseract
 let ocrState = { available: false, enabled: false, version: "",
                  languages: [], has_russian: false, install_url: "" };
@@ -326,6 +326,7 @@ async function refreshBooks() {
     bookListEl.appendChild(el("div", "empty", "Сначала выберите или создайте агента."));
     bookFilesEl.disabled = true;
     indexBtnEl.disabled = true;
+    reindexBtnEl.disabled = true;
     jobEl.hidden = true;
     renderOcrHint();
     return;
@@ -339,16 +340,16 @@ async function refreshBooks() {
     return;
   }
   const books = data.books || [];
-  bookCount = books.length;
   booksCache = books;
   bookListEl.innerHTML = "";
-  if (!books.length) {
-    bookListEl.appendChild(el("div", "empty", data.chunks
-      ? "Файлов в папке нет, но в базе остались фрагменты проиндексированных книг — они продолжают работать, пока вы не очистите базу."
+  if (!hasBooksToRead()) {
+    bookListEl.appendChild(el("div", "empty", books.length
+      ? "В папке книг нет: ниже остались только фрагменты книг, убранных мимо интерфейса."
       : "В папке агента пока нет книг."));
   }
   books.forEach((book) => bookListEl.appendChild(bookRow(book)));
-  indexBtnEl.disabled = !books.length || indexRunning;
+  indexBtnEl.disabled = !hasBooksToRead() || indexRunning;
+  reindexBtnEl.disabled = indexBtnEl.disabled;
   renderOcrHint();
   pollJob();
 }
@@ -367,7 +368,8 @@ async function refreshBookStates() {
   }
   if (slug !== currentSlug) return;
   booksCache = data.books || [];
-  bookCount = booksCache.length;
+  indexBtnEl.disabled = !hasBooksToRead() || indexRunning;
+  reindexBtnEl.disabled = indexBtnEl.disabled;
   applyBookStates();
   renderOcrHint();
 }
@@ -387,10 +389,17 @@ const isReading = (book) => Boolean(indexRunning) && book.name === indexFile;
 
 /** Подпись книги: размер и что с ней уже сделали (или делают сейчас). */
 function bookLine(book) {
-  return `${book.size_text || humanSize(book.size)} · ${bookState(book)}`;
+  const size = book.size_text || (book.size ? humanSize(book.size) : "");
+  return [size, bookState(book)].filter(Boolean).join(" · ");
 }
 
+/** Есть ли в папке книги, которые можно читать (без убранных мимо интерфейса). */
+const hasBooksToRead = () => booksCache.some((book) => !book.missing);
+
 function bookState(book) {
+  if (book.missing) {
+    return `файла нет — прежних фрагментов ${book.chunks}`;
+  }
   if (isReading(book)) {
     return book.chunks ? `фрагментов ${book.chunks} — читается сейчас` : "читается сейчас…";
   }
@@ -405,6 +414,7 @@ function bookRow(book) {
 
   const main = el("div", "row-main");
   const title = el("div", "row-title", book.name);
+  if (book.missing) title.appendChild(el("span", "badge warn", "нет файла"));
   if (!book.supported) title.appendChild(el("span", "badge warn", "формат не читается"));
   if (book.needs_ocr) title.appendChild(el("span", "badge warn", "скан"));
   main.appendChild(title);
@@ -415,7 +425,9 @@ function bookRow(book) {
   const remove = el("button", "icon danger", "🗑");
   remove.type = "button";
   remove.dataset.act = "delete";
-  remove.title = "Удалить книгу и её фрагменты";
+  remove.title = book.missing
+    ? "Убрать фрагменты книги, которой нет в папке"
+    : "Удалить книгу: файл и её фрагменты";
   actions.appendChild(remove);
   row.appendChild(actions);
   return row;
@@ -425,12 +437,18 @@ bookListEl.addEventListener("click", async (event) => {
   const button = event.target.closest("button[data-act='delete']");
   if (!button || !currentSlug) return;
   const name = button.closest(".row").dataset.name;
-  if (!window.confirm(`Удалить «${name}» из книг агента и из базы?`)) return;
+  const book = booksCache.find((item) => item.name === name) || {};
+  const question = book.missing
+    ? `Файла «${name}» в папке уже нет. Убрать из базы оставшиеся фрагменты (${book.chunks || 0})?`
+    : `Удалить «${name}»: файл с диска и её фрагменты из базы?`;
+  if (!window.confirm(question)) return;
   try {
     const data = await api(
-      `/api/agents/${encodeURIComponent(currentSlug)}/books/${encodeURIComponent(name)}`,
+      `/api/agents/${encodeURIComponent(currentSlug)}/book?name=${encodeURIComponent(name)}`,
       { method: "DELETE" });
-    showNote(`«${name}» удалена: убрано фрагментов ${data.removed}`);
+    showNote(data.file
+      ? `«${name}» удалена: файл и фрагментов ${data.removed}`
+      : `«${name}»: файла уже не было, убрано фрагментов ${data.removed}`);
     refreshBooks();
     refreshAgents();
   } catch (error) {
@@ -488,13 +506,18 @@ function uploadBooks(files) {
   });
 }
 
-indexBtnEl.addEventListener("click", startIndex);
+indexBtnEl.addEventListener("click", () => startIndex(false));
+reindexBtnEl.addEventListener("click", () => startIndex(true));
 
-async function startIndex() {
+async function startIndex(full) {
   if (!currentSlug) return;
+  if (full && !window.confirm("Перечитать все книги заново? Это займёт столько же "
+                              + "времени, сколько первая индексация.")) return;
   indexBtnEl.disabled = true;
+  reindexBtnEl.disabled = true;
   try {
-    const data = await api(`/api/agents/${encodeURIComponent(currentSlug)}/index`,
+    const suffix = full ? "?full=true" : "";
+    const data = await api(`/api/agents/${encodeURIComponent(currentSlug)}/index${suffix}`,
                            { method: "POST" });
     renderJob(data.job);
     jobRunning = data.job && data.job.state === "running";
@@ -506,6 +529,7 @@ async function startIndex() {
     showNote(error.message, "error");
   } finally {
     indexBtnEl.disabled = false;
+    reindexBtnEl.disabled = false;
   }
 }
 
@@ -527,6 +551,7 @@ async function pollJob() {
     indexRunning = true;
     indexFile = job.file || "";
     indexBtnEl.disabled = true;
+    reindexBtnEl.disabled = true;
     renderJob(job);
     jobTicks += 1;
     // Раз в пять секунд подновляем и список книг: он должен показывать,
@@ -537,8 +562,12 @@ async function pollJob() {
     jobRunning = false;             // индексация только что закончилась
     indexRunning = false;
     indexFile = "";
-    indexBtnEl.disabled = !bookCount;
+    indexBtnEl.disabled = !hasBooksToRead();
+    reindexBtnEl.disabled = indexBtnEl.disabled;
     if (job) renderJob(job);
+    if (job && !job.added && job.ready) {
+      showNote(`Все книги уже были в базе: перечитывать нечего (${job.ready}).`);
+    }
     refreshBooks();
     refreshAgents();
   }
@@ -577,9 +606,12 @@ function renderJob(job) {
   } else if (error) {
     label = `Не получилось: ${job.error || "неизвестная ошибка"}`;
   } else if (done) {
-    label = `Готово: в базе ${job.chunks} фрагментов`
-      + (failed ? `, сбоев ${failed}` : "")
-      + (job.skipped ? `, пропущено ${job.skipped}` : "");
+    const parts = [`в базе ${job.chunks} фрагментов`];
+    if (job.added) parts.push(`прочитано книг: ${job.added}`);
+    if (job.ready) parts.push(`уже было: ${job.ready}`);
+    if (failed) parts.push(`сбоев ${failed}`);
+    if (job.skipped) parts.push(`пропущено ${job.skipped}`);
+    label = `Готово: ${parts.join(", ")}`;
   } else if (job.file) {
     label = `Читаю книгу ${job.index} из ${job.total || "?"}: ${job.file}`;
   } else {

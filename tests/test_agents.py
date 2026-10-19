@@ -138,10 +138,27 @@ class BookTests(unittest.TestCase):
 
     def test_names_outside_the_agent_folder_are_rejected(self):
         for name in ("../секрет.txt", r"..\секрет.txt", "books/../x.txt",
-                     "", "   ", ".скрытый", "подпапка/книга.txt"):
+                     "подпапка/../../x.txt", "/абсолютный/путь.txt",
+                     r"C:\Windows\x.txt", "", "   ", ".скрытый",
+                     ".скрытая/книга.txt"):
             with self.subTest(name=name):
                 with self.assertRaises(AgentError):
                     self.agents.book_path(self.agent.slug, name)
+
+    def test_book_in_subfolder_is_listed_and_removed(self):
+        """Книга в подпапке видна в интерфейсе путём и удаляется по нему.
+
+        Индексация читает и подпапки, поэтому такая книга должна быть видна
+        в списке — иначе она попадает в базу, не показываясь пользователю.
+        """
+        folder = self.agent.books_dir / "выпечка"
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "плов.pdf").write_bytes(b"x")
+
+        books = self.agents.books(self.agent.slug)
+        self.assertEqual([book["name"] for book in books], ["выпечка/плов.pdf"])
+        self.assertTrue(self.agents.remove_book(self.agent.slug, "выпечка/плов.pdf"))
+        self.assertFalse((folder / "плов.pdf").exists())
 
     def test_surrounding_spaces_are_trimmed_from_names(self):
         self.agents.write_book(self.agent.slug, " книга.txt ", [b"x"])

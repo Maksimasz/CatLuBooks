@@ -91,6 +91,19 @@ def unit_for(path) -> str:
     return UNITS.get(Path(path).suffix.lower(), "часть")
 
 
+def relative_name(path, root) -> str:
+    """Как файл называется внутри папки: путь через «/», а не только имя.
+
+    Так книга из подпапки не путается с одноимённой в корне: и в базе, и в
+    интерфейсе у неё одно и то же имя («выпечка/плов.pdf»).
+    """
+    file, folder = Path(path), Path(root)
+    try:
+        return file.relative_to(folder).as_posix()
+    except ValueError:
+        return file.name
+
+
 def clean_text(text: str) -> str:
     """Убирает колонтитулы и переносы, оставляя читаемый текст.
 

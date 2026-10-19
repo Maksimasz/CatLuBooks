@@ -124,11 +124,32 @@ class ApiTests(unittest.TestCase):
         self.agents.write_book(agent.slug, "Плов.pdf", [b"pdf"])
         self.registry.get.return_value.delete_source.return_value = 5
 
-        response = self.client.delete(f"/api/agents/{agent.slug}/books/Плов.pdf")
+        response = self.client.delete(f"/api/agents/{agent.slug}/book",
+                                      params={"name": "Плов.pdf"})
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["removed"], 5)
+        self.assertTrue(response.json()["file"])
         self.assertFalse((agent.books_dir / "Плов.pdf").exists())
+
+    def test_fragments_of_a_removed_book_are_listed_and_can_be_dropped(self):
+        """Файл убрали мимо интерфейса: фрагменты видно и можно убрать."""
+        agent = self.agents.create("Кулинария")
+        self.registry.get.return_value.source_counts.return_value = {"Старая.pdf": 9}
+        self.registry.get.return_value.delete_source.return_value = 9
+
+        listed = self.client.get(f"/api/agents/{agent.slug}/books").json()
+
+        self.assertEqual(listed["missing"], 1)
+        self.assertTrue(listed["books"][0]["missing"])
+        self.assertEqual(listed["books"][0]["chunks"], 9)
+
+        response = self.client.delete(f"/api/agents/{agent.slug}/book",
+                                      params={"name": "Старая.pdf"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.json()["file"])
+        self.assertEqual(response.json()["removed"], 9)
 
     def test_clearing_base_keeps_books(self):
         agent = self.agents.create("Кулинария")

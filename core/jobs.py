@@ -32,6 +32,8 @@ class Job:
     chunks: int = 0         # сколько фрагментов уже записано
     failed: int = 0
     skipped: int = 0        # книги, убранные из папки во время работы
+    ready: int = 0          # книги, которые уже были в базе и не изменились
+    added: int = 0          # сколько книг прочитано за этот запуск
     error: str = ""
     started: float = field(default_factory=time.time)
     finished: Optional[float] = None
@@ -48,6 +50,8 @@ class Job:
             "chunks": self.chunks,
             "failed": self.failed,
             "skipped": self.skipped,
+            "ready": self.ready,
+            "added": self.added,
             "error": self.error,
             "started": self.started,
             "finished": self.finished,
@@ -87,7 +91,14 @@ class Jobs:
         kind = event.get("event")
         if kind == "files":
             job.total = int(event.get("total") or 0)
-            job._log(f"Файлов к обработке: {job.total}")
+            ready = int(event.get("ready") or 0)
+            line = f"Файлов к чтению: {job.total}"
+            if ready:
+                line += f" (уже в базе: {ready})"
+            job._log(line)
+        elif kind == "ready":
+            job.ready = int(event.get("total") or 0)
+            job._log(f"Уже в базе, читать заново не нужно: {job.ready}")
         elif kind == "file":
             job.index = int(event.get("index") or 0)
             job.file = str(event.get("source") or "")
@@ -110,9 +121,14 @@ class Jobs:
             job.chunks = int(event.get("chunks") or job.chunks)
             job.failed = int(event.get("failed") or job.failed)
             job.skipped = int(event.get("skipped") or job.skipped)
+            job.ready = int(event.get("ready") or job.ready)
+            job.added = int(event.get("added") or job.added)
             job.state = "done"
             job.finished = time.time()
-            job._log(f"Готово: {job.chunks} фрагментов, файлов {event.get('added')}")
+            line = f"Готово: в базе {job.chunks} фрагментов, прочитано {job.added}"
+            if job.ready:
+                line += f", уже было {job.ready}"
+            job._log(line)
         elif kind == "error":
             job.state = "error"
             job.error = str(event.get("message") or "не получилось")

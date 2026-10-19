@@ -1,7 +1,7 @@
 """Проверки реестра баз агентов: ChromaDB и модель эмбеддингов подменены."""
 import tempfile
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 from config import Config
 from core.agents import Agents
@@ -95,11 +95,14 @@ class RegistryTests(unittest.TestCase):
 
             reporter = lambda event: None
             self.assertTrue(store.index("путь", progress=reporter))
+            self.assertTrue(store.index("путь", progress=reporter, full=True))
             self.assertEqual(store.delete_source("Плов.pdf"), 7)
             self.assertEqual(store.clear(), 12)
 
-        store._db.process_research_folder.assert_called_once_with(
-            "путь", progress=reporter)
+        self.assertEqual(store._db.process_research_folder.call_args_list, [
+            call("путь", progress=reporter, full=False),
+            call("путь", progress=reporter, full=True),
+        ])
         store._db.delete_source.assert_called_once_with("Плов.pdf")
 
 

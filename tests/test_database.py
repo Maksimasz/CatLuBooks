@@ -29,6 +29,7 @@ class StreamingImportTests(unittest.TestCase):
         self.db = module.RAGDatabase.__new__(module.RAGDatabase)
         self.db.collection = Mock()
         self.db.embedding_model = Mock()
+        self.db.tesseract = None
         self.db.embedding_model.encode.side_effect = lambda chunks, **kw: types.SimpleNamespace(
             tolist=lambda: [[len(chunk)] for chunk in chunks]
         )
@@ -261,15 +262,105 @@ class InitTests(unittest.TestCase):
         self.assertEqual(self.db.source_counts(),
                          {"Плов.pdf": 2, "Борщ.pdf": 1, "неизвестно": 1})
 
+    def test_source_info_keeps_size_time_and_ocr(self):
+        """По записи книги видно, изменилась ли она: размер, время, OCR."""
+        self.db = module.RAGDatabase.__new__(module.RAGDatabase)
+        self.db.collection = Mock()
+        self.db.collection.get.return_value = {"metadatas": [
+            {"source": "книга.pdf", "file_size": 100, "file_mtime": 5, "ocr": False},
+            {"source": "книга.pdf", "file_size": 100, "file_mtime": 5, "ocr": True},
+        ]}
+        self.assertEqual(self.db.source_info()["книга.pdf"],
+                         {"chunks": 2, "size": 100, "mtime": 5, "ocr": True})
+
 
 class FolderTests(unittest.TestCase):
     def setUp(self):
         self.db = module.RAGDatabase.__new__(module.RAGDatabase)
         self.db.collection = Mock()
+        self.db.collection.get.return_value = {"metadatas": []}
         self.db.formats = ['.pdf', '.epub', '.txt']
         self.db.tesseract = None
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
+
+    def record_of(self, name, *, size, mtime, ocr=False):
+        """Как выглядит книга в базе: метаданные её фрагментов."""
+        self.db.collection.get.return_value = {"metadatas": [
+            {"source": name, "file_size": size, "file_mtime": mtime, "ocr": ocr}]}
+
+    def test_book_already_in_base_is_not_read_again(self):
+        """Прочитанная и не изменившаяся книга не читается заново."""
+        path = Path(self.temp.name, 'плов.txt')
+        path.write_bytes(b'x')
+        stamp = path.stat()
+        self.record_of('плов.txt', size=stamp.st_size, mtime=stamp.st_mtime_ns)
+        self.db.add_file_to_database = Mock()
+        self.db.collection.count.return_value = 42
+        events = []
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            result = self.db.process_research_folder(
+                self.temp.name, progress=events.append)
+
+        self.assertTrue(result)
+        self.assertFalse(self.db.add_file_to_database.called)
+        self.assertIn('читать нечего', output.getvalue())
+        self.assertEqual([event['event'] for event in events],
+                         ['ready', 'files', 'done'])
+        self.assertEqual(events[-1]['ready'], 1)
+        self.assertEqual(events[-1]['added'], 0)
+
+    def test_edited_book_is_read_again(self):
+        """Книгу заменили (размер другой) — её читают заново."""
+        path = Path(self.temp.name, 'плов.txt')
+        path.write_bytes(b'x')
+        stamp = path.stat()
+        self.record_of('плов.txt', size=stamp.st_size + 1, mtime=stamp.st_mtime_ns)
+        self.db.add_file_to_database = Mock()
+        self.db.collection.count.return_value = 42
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.db.process_research_folder(self.temp.name)
+
+        self.assertTrue(self.db.add_file_to_database.called)
+
+    def test_unknown_mtime_does_not_force_rereading(self):
+        """У старых записей времени нет: решает размер, полного пересбора нет."""
+        path = Path(self.temp.name, 'плов.txt')
+        path.write_bytes(b'x')
+        stamp = path.stat()
+        self.db.collection.get.return_value = {"metadatas": [
+            {"source": "плов.txt", "file_size": stamp.st_size}]}
+        self.db.add_file_to_database = Mock()
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.db.process_research_folder(self.temp.name)
+
+        self.assertFalse(self.db.add_file_to_database.called)
+
+    def test_scan_indexed_without_ocr_is_read_again_when_ocr_is_on(self):
+        """Скан, прочитанный без распознавания, перечитывается при OCR."""
+        path = Path(self.temp.name, 'скан.pdf')
+        path.write_bytes(b'x')
+        stamp = path.stat()
+        self.record_of('скан.pdf', size=stamp.st_size, mtime=stamp.st_mtime_ns)
+        self.db.tesseract = Mock()
+        self.db.add_file_to_database = Mock()
+        with patch.object(module.parsers, 'probe', return_value={"needs_ocr": True}):
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.db.process_research_folder(self.temp.name)
+
+        self.assertTrue(self.db.add_file_to_database.called)
+
+    def test_full_reindex_reads_ready_books_again(self):
+        """«Всё заново» перечитывает и те книги, что уже в базе."""
+        path = Path(self.temp.name, 'плов.txt')
+        path.write_bytes(b'x')
+        stamp = path.stat()
+        self.record_of('плов.txt', size=stamp.st_size, mtime=stamp.st_mtime_ns)
+        self.db.add_file_to_database = Mock()
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.db.process_research_folder(self.temp.name, full=True)
+
+        self.assertTrue(self.db.add_file_to_database.called)
 
     def test_folder_reports_failed_file(self):
         Path(self.temp.name, 'broken.pdf').write_bytes(b'x')
@@ -278,13 +369,13 @@ class FolderTests(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()) as output:
             result = self.db.process_research_folder(self.temp.name)
         self.assertFalse(result)
-        self.assertIn('0/1', output.getvalue())
+        self.assertIn('Прочитано книг: 0 из 1', output.getvalue())
 
     def test_folder_reads_supported_formats_and_skips_others(self):
         for name in ('книга.epub', 'заметки.txt', 'рецепты.pdf', 'скан.djvu'):
             Path(self.temp.name, name).write_bytes(b'x')
         calls = []
-        self.db.add_file_to_database = lambda path: calls.append(Path(path).name)
+        self.db.add_file_to_database = lambda path, source=None: calls.append(source)
         self.db.collection.count.return_value = 0
         with contextlib.redirect_stdout(io.StringIO()) as output:
             self.db.process_research_folder(self.temp.name)
@@ -297,7 +388,7 @@ class FolderTests(unittest.TestCase):
             Path(self.temp.name, name).write_bytes(b'x')
         removed = Path(self.temp.name, 'б.txt')
 
-        def read(path):
+        def read(path, source=None):
             removed.unlink()      # пока читалась первая книга, вторую убрали
             return None
 

@@ -88,9 +88,15 @@ class VectorStore:
         return self._db.source_counts()
 
     def index(self, books_folder: str,
-              progress: Optional[Callable[[Dict[str, Any]], None]] = None) -> bool:
-        """Индексирует книги агента (запускается фоновой задачей)."""
-        return self._db.process_research_folder(books_folder, progress=progress)
+              progress: Optional[Callable[[Dict[str, Any]], None]] = None,
+              full: bool = False) -> bool:
+        """Индексирует книги агента (запускается фоновой задачей).
+
+        full=False — читает только новые и изменившиеся книги: уже готовые
+        пропускаются, поэтому добавить одну книгу можно за минуты.
+        """
+        return self._db.process_research_folder(books_folder, progress=progress,
+                                                full=full)
 
     def delete_source(self, name: str) -> int:
         """Убирает из базы фрагменты книги; файл на диске не трогает."""
