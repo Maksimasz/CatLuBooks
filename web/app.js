@@ -132,6 +132,7 @@ function selectTab(name) {
   if (name === "agents") refreshAgents();
   if (name === "books") { refreshBooks(); loadOcr(); }
   if (name === "base") refreshAgents();
+  if (name === "server") refreshServer();
 }
 
 gearEl.addEventListener("click", () => openPanel());
@@ -851,6 +852,90 @@ async function refreshStats() {
   } catch (error) {
     statsEl.textContent = error.message;
   }
+}
+
+/* ---- Сервер ----------------------------------------------------------- */
+const serverStatusEl = document.getElementById("server-status");
+const serverRestartEl = document.getElementById("server-restart");
+const serverStopEl = document.getElementById("server-stop");
+const serverCommandEl = document.getElementById("server-command");
+
+async function refreshServer() {
+  let data;
+  try {
+    data = await api("/api/server");
+  } catch (error) {
+    showNote(error.message, "error");
+    return;
+  }
+  renderServerStatus(data);
+}
+
+function renderServerStatus(data) {
+  serverStatusEl.innerHTML = "";
+  const uptime = humanTime(data.uptime);
+  const rows = [
+    ["Адрес для телефона", data.lan_url || "нет (ПК не в сети?)"],
+    ["На этом ПК", data.urls[0]],
+    ["Порт", String(data.port)],
+    ["Работает", uptime],
+    ["Процесс", String(data.pid)],
+    ["Python", data.python],
+    ["Папка проекта", data.folder],
+  ];
+  rows.forEach(([key, value]) => {
+    const row = el("div", "stat");
+    row.appendChild(el("span", "stat-key", key));
+    row.appendChild(el("span", "stat-value", value));
+    serverStatusEl.appendChild(row);
+  });
+  if (data.start_command) {
+    serverCommandEl.hidden = false;
+    serverCommandEl.textContent = "Запустить вручную:\n" + data.start_command;
+  }
+}
+
+serverRestartEl.addEventListener("click", async () => {
+  if (!window.confirm("Перезапустить сервер?\nОн выключится и включится заново через пару секунд.")) return;
+  serverRestartEl.disabled = true;
+  serverStopEl.disabled = true;
+  try {
+    await api("/api/server/restart", { method: "POST" });
+  } catch (error) {
+    serverRestartEl.disabled = false;
+    serverStopEl.disabled = false;
+    showNote(error.message, "error");
+    return;
+  }
+  showNote("Сервер перезапускается… страница обновится сама, когда он поднимется.");
+  await waitForServer();
+});
+
+serverStopEl.addEventListener("click", async () => {
+  if (!window.confirm("Остановить сервер?\nЗапустить обратно можно только на компьютере (команда ниже).")) return;
+  serverRestartEl.disabled = true;
+  serverStopEl.disabled = true;
+  try {
+    const data = await api("/api/server/stop", { method: "POST" });
+    showNote("Сервер останавливается. Запустить обратно: " + data.start_command.replace(/\\n/g, " "), "error");
+  } catch (error) {
+    serverRestartEl.disabled = false;
+    serverStopEl.disabled = false;
+    showNote(error.message, "error");
+  }
+});
+
+/** Ждёт, пока сервер снова ответит, и перезагружает страницу. */
+async function waitForServer() {
+  const started = Date.now();
+  while (Date.now() - started < 60000) {
+    try {
+      const response = await fetch("/health", { cache: "no-store" });
+      if (response.ok) { location.reload(); return; }
+    } catch { /* сервер ещё поднимается */ }
+    await new Promise((resolve) => setTimeout(resolve, 700));
+  }
+  showNote("Сервер не ответил за минуту. Запустите его на компьютере: uv run python app.py", "error");
 }
 
 /* ---- Модели и ключи --------------------------------------------------- */

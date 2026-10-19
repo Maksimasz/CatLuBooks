@@ -30,9 +30,21 @@ class ApiTests(unittest.TestCase):
         self.ocr_before = app_module.CONFIG.store.ocr
         self.addCleanup(setattr, app_module.CONFIG.store, "ocr", self.ocr_before)
 
+        self.server = Mock()
+        self.server.status.return_value = {
+            "pid": 1234, "host": "0.0.0.0", "port": 8000, "uptime": 42,
+            "urls": ["http://127.0.0.1:8000", "http://192.168.1.5:8000"],
+            "lan_url": "http://192.168.1.5:8000", "python": "3.12.0",
+            "folder": "/tmp/project",
+            "start_command": "cd /tmp/project\npython app.py",
+            "can_restart": True, "can_start": False,
+        }
+        self.server.restart.return_value = 9999
+
         for patcher in (
             patch.object(app_module, "AGENTS", self.agents),
             patch.object(app_module, "REGISTRY", self.registry),
+            patch.object(app_module, "SERVER", self.server),
         ):
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -240,6 +252,32 @@ class ApiTests(unittest.TestCase):
 
         self.assertFalse(data["books"][0]["needs_ocr"])
         self.assertEqual(data["needs_ocr"], 0)
+
+
+    # --- сервер -----------------------------------------------------------
+    def test_server_status_is_reported(self):
+        data = self.client.get("/api/server").json()
+
+        self.assertEqual(data["port"], 8000)
+        self.assertEqual(data["lan_url"], "http://192.168.1.5:8000")
+        self.assertTrue(data["can_restart"])
+        self.assertFalse(data["can_start"])
+
+    def test_server_restart_schedules_shutdown(self):
+        response = self.client.post("/api/server/restart")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["restarting"])
+        self.assertEqual(response.json()["pid"], 9999)
+        self.server.restart.assert_called_once()
+
+    def test_server_stop_returns_start_command(self):
+        response = self.client.post("/api/server/stop")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["stopping"])
+        self.assertIn("python app.py", response.json()["start_command"])
+        self.server.stop.assert_called_once()
 
 
 if __name__ == '__main__':

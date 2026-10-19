@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
 import time
 from contextlib import asynccontextmanager
@@ -30,6 +31,7 @@ from core.database import UNKNOWN_SOURCE
 from core.jobs import Jobs
 from core.llm import LLMError, OpenAICompatClient
 from core.models import forget_models, provider_models
+from core.server import ServerControl, SUCCESSOR_ENV, wait_until_free
 from core.providers import (
     PROVIDERS,
     key_for,
@@ -52,6 +54,7 @@ CONFIG: Config = load_config()
 AGENTS = Agents(CONFIG.store.agents_root)
 REGISTRY = StoreRegistry(CONFIG, AGENTS)
 JOBS = Jobs()
+SERVER = ServerControl(CONFIG.server.host, CONFIG.server.port)
 
 
 def save_last_request(record: dict) -> None:
@@ -558,6 +561,42 @@ async def clear_base(slug: str):
     return {"ok": True, "removed": removed}
 
 
+@app.get("/api/server")
+async def server_status():
+    """Что за сервер запущен: адрес для телефона, порт, сколько работает.
+
+    Интерфейс показывает это на вкладке «Сервер», чтобы не пришлось искать
+    IP компьютера в командной строке.
+    """
+    return SERVER.status()
+
+
+@app.post("/api/server/restart")
+async def server_restart():
+    """Перезапускает сервер: нужен после правки config.yaml или git pull.
+
+    Сначала запускается копия (свежий код подхватится), затем этот процесс
+    завершается. Ответ уходит до остановки, чтобы браузер успел его показать.
+    """
+    try:
+        pid = SERVER.restart()
+    except Exception as exc:
+        raise HTTPException(status_code=500,
+                            detail=f"Не удалось перезапустить сервер: {exc}")
+    return {"ok": True, "restarting": True, "pid": pid,
+            "urls": SERVER.status()["urls"]}
+
+
+@app.post("/api/server/stop")
+async def server_stop():
+    """Останавливает сервер: запустить обратно можно только на компьютере.
+
+    Из браузера поднять остановленный сервер нельзя — на это есть команда.
+    """
+    SERVER.stop()
+    return {"ok": True, "stopping": True, "start_command": SERVER.status()["start_command"]}
+
+
 # Статика (index.html, app.js, PWA) — монтируется последней, чтобы
 # не перехватывать запросы к /api/*.
 app.mount("/", StaticFiles(directory=str(WEB_DIR), html=True), name="web")
@@ -566,7 +605,17 @@ app.mount("/", StaticFiles(directory=str(WEB_DIR), html=True), name="web")
 def main():
     import uvicorn
 
-    uvicorn.run(app, host=CONFIG.server.host, port=CONFIG.server.port, log_level="info")
+    if os.environ.get(SUCCESSOR_ENV):
+        # Это перезапущенный сервер: ждём, пока предыдущий отпустит порт.
+        print("Перезапуск: жду, пока предыдущий сервер освободит порт…")
+        if not wait_until_free(CONFIG.server.host, CONFIG.server.port, timeout=30.0):
+            print("Порт всё ещё занят — пробую запуститься всё равно")
+
+    config = uvicorn.Config(app, host=CONFIG.server.host, port=CONFIG.server.port,
+                            log_level="info")
+    server = uvicorn.Server(config)
+    SERVER.uvicorn = server
+    server.run()
 
 
 if __name__ == "__main__":

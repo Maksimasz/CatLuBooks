@@ -9,7 +9,7 @@
   <link rel="manifest" href="/manifest.webmanifest">
   <link rel="icon" href="/icon-192.png">
   <link rel="apple-touch-icon" href="/icon-192.png">
-  <link rel="stylesheet" href="/style.css?v=14">
+  <link rel="stylesheet" href="/style.css?v=16">
 </head>
 <body>
   <header class="topbar">
@@ -46,6 +46,7 @@
           <button class="tab" data-tab="books" type="button">Книги</button>
           <button class="tab" data-tab="models" type="button">Модели</button>
           <button class="tab" data-tab="base" type="button">База</button>
+          <button class="tab" data-tab="server" type="button">Сервер</button>
         </nav>
         <button id="panel-close" class="icon" type="button" title="Закрыть" aria-label="Закрыть">✕</button>
       </header>
@@ -90,7 +91,9 @@
           <div id="book-list" class="list"></div>
           <p class="note">Индексировать — значит прочитать книги и положить их в базу
             агента. Это может занять минуты; работа идёт в фоне, настройки можно закрыть.
-            Повторная индексация обновляет уже добавленные книги.</p>
+            Повторная индексация обновляет уже добавленные книги. Удаление книги (🗑)
+            работает на ходу — останавливать сервер не нужно, файл и фрагменты
+            убираются сами.</p>
         </section>
 
         <section class="tab-page" data-page="models" hidden>
@@ -121,10 +124,25 @@
             остаются. Удаление агента стирает его папку целиком — вместе с книгами,
             базой и настройками; отменить это нельзя.</p>
         </section>
+
+        <section class="tab-page" data-page="server" hidden>
+          <div id="server-status" class="stats-grid"></div>
+          <div class="row-new">
+            <button id="server-restart" class="ghost" type="button"
+                    title="Перезапустить сервер: нужен после правки config.yaml или git pull">Перезапустить</button>
+            <button id="server-stop" class="danger" type="button"
+                    title="Остановить сервер: запустить обратно можно только на компьютере">Остановить</button>
+          </div>
+          <p class="note">Перезапуск поднимает сервер заново (свежий код и настройки).
+            Остановленный сервер поднять обратно можно только на компьютере — командой,
+            которая показана ниже. Останавливать сервер, чтобы что-то удалить из базы,
+            не нужно: удаление в интерфейсе работает на ходу, сервер сам всё закрывает.</p>
+          <p class="note" id="server-command" hidden></p>
+        </section>
       </div>
     </div>
   </div>
 
-  <script src="/app.js?v=14"></script>
+  <script src="/app.js?v=16"></script>
 </body>
 </html>
