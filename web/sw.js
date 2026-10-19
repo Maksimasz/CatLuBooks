@@ -1,6 +1,6 @@
 // Оболочка приложения: сначала сеть, кэш — только когда сервер недоступен.
 // Так браузер всегда получает свежий интерфейс после обновления.
-const CACHE = "catlu-shell-v22";
+const CACHE = "catlu-shell-v23";
 const SHELL = ["/", "/index.html", "/style.css", "/app.js", "/manifest.webmanifest", "/icon-192.png"];
 
 self.addEventListener("install", (event) => {
@@ -26,6 +26,10 @@ self.addEventListener("activate", (event) => {
 self.addEventListener("fetch", (event) => {
   const url = new URL(event.request.url);
   if (event.request.method !== "GET" || url.pathname.startsWith("/api/")) return;
+  // Проверку «жив ли сервер» нельзя отдавать из кэша: иначе страница
+  // будет считать сервер работающим, когда он упал, и не перезагрузится
+  // после перезапуска. Пусть идёт прямо в сеть.
+  if (url.pathname === "/health") return;
 
   event.respondWith(
     (async () => {

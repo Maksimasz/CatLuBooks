@@ -78,7 +78,13 @@ function el(tag, cls, text) {
 
 /** Запрос к серверу: ошибка сервера превращается в понятный текст. */
 async function api(path, options) {
-  const response = await fetch(path, options);
+  let response;
+  try {
+    response = await fetch(path, options);
+  } catch {
+    // Сервер не отвечает: он перезапускается, остановлен или недоступен по сети.
+    throw new Error("Сервер недоступен — проверьте, запущен ли он");
+  }
   let data = null;
   try { data = await response.json(); } catch { data = null; }
   if (!response.ok) {
@@ -909,11 +915,24 @@ setInterval(async () => {
     ok = response.ok;
   } catch { ok = false; }
   if (!ok) {
+    serverDown = true;
+    failedChecks += 1;
     if (!overlayEl.hidden) return;
     showOverlay(restarting ? "Сервер перезапускается…"
                            : "Сервер недоступен. Проверьте, запущен ли он.");
-  } else if (!overlayEl.hidden) {
-    hideOverlay();
+  } else {
+    // Сервер снова отвечает. Если он недоступен был два раза подряд (≈6 секунд) —
+    // это перезапуск: обновляем страницу, иначе она останется со старыми
+    // данными и нерабочими запросами. Одиночный сбой трогать не будем.
+    if (serverDown && failedChecks >= 2) {
+      serverDown = false;
+      failedChecks = 0;
+      hideOverlay();
+      reloadPage();
+      return;
+    }
+    failedChecks = 0;
+    if (!overlayEl.hidden) hideOverlay();
   }
 }, 3000);
 
@@ -991,16 +1010,36 @@ serverStopEl.addEventListener("click", async () => {
 });
 
 let reloading = false;        // страница уже перезагружается
+let serverDown = false;       // сервер только что был недоступен
+let failedChecks = 0;         // сколько проверок подряд сервер не отвечал
 
-/** Ждёт, пока сервер снова ответит, и перезагружает страницу. */
+/** Перезагружает страницу через короткую паузу — чтобы точно сработало. */
+function reloadPage() {
+  if (reloading) return;
+  reloading = true;
+  setTimeout(() => location.reload(), 300);
+}
+
+/** Ждёт, пока сервер уйдёт и вернётся, и перезагружает страницу. */
 async function waitForServer() {
   const started = Date.now();
-  while (Date.now() - started < 120000) {
+  // Сначала дожидаемся, пока старый сервер действительно прекратит отвечать:
+  // иначе можно перезагрузить страницу, а сервер умрёт сразу после этого.
+  while (Date.now() - started < 30000) {
+    try {
+      await fetch("/health", { cache: "no-store" });
+    } catch {
+      break;                    // сервер ушёл — теперь ждём его возвращения
+    }
+    await new Promise((resolve) => setTimeout(resolve, 300));
+  }
+  // Теперь ждём, пока поднимется новый.
+  const back = Date.now();
+  while (Date.now() - back < 120000) {
     try {
       const response = await fetch("/health", { cache: "no-store" });
-      if (response.ok && !reloading) {
-        reloading = true;
-        location.reload();
+      if (response.ok) {
+        reloadPage();
         return;
       }
     } catch { /* сервер ещё поднимается */ }
