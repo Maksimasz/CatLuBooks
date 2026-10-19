@@ -518,7 +518,7 @@ function renderJob(job) {
     bar.appendChild(fill);
     line.appendChild(bar);
     if (job.chunks) line.appendChild(el("span", "job-extra", `записано фрагментов: ${job.chunks}`));
-  } else if (!job.upload && job.log && job.log.length) {
+  } else if (error && job.log && job.log.length) {
     line.appendChild(el("span", "job-extra", job.log[job.log.length - 1]));
   }
   showJob(line);
