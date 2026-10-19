@@ -51,6 +51,7 @@ let jobRunning = false;
 let indexRunning = false;        // у сервера уже идёт индексация
 let bookCount = 0;               // сколько книг у активного агента
 let booksCache = [];             // книги активного агента: нужны подсказкам OCR
+let ocrLoaded = false;           // ответил ли сервер про tesseract
 let ocrState = { available: false, enabled: false, version: "",
                  languages: [], has_russian: false, install_url: "" };
 
@@ -549,6 +550,7 @@ async function loadOcr() {
     ocrState = { available: false, enabled: false, version: "",
                  languages: [], has_russian: false, install_url: "" };
   }
+  ocrLoaded = true;
   renderOcr();
 }
 
@@ -574,6 +576,11 @@ function renderOcr() {
 function renderOcrHint() {
   ocrHintEl.innerHTML = "";
   const scans = booksCache.filter((book) => book.needs_ocr);
+
+  if (!ocrLoaded) {          // ещё не знаем, есть ли tesseract — молчим
+    ocrHintEl.hidden = true;
+    return;
+  }
 
   if (!ocrState.available) {
     ocrHintEl.hidden = false;
