@@ -22,6 +22,9 @@ const bookFilesEl = document.getElementById("book-files");
 const indexBtnEl = document.getElementById("index-btn");
 const jobEl = document.getElementById("job");
 const bookListEl = document.getElementById("book-list");
+const ocrToggleEl = document.getElementById("ocr-toggle");
+const ocrStatusEl = document.getElementById("ocr-status");
+const ocrHintEl = document.getElementById("ocr-hint");
 const providerEl = document.getElementById("provider");
 const modelEl = document.getElementById("model-input");
 const modelListEl = document.getElementById("model-list");
@@ -47,6 +50,9 @@ let jobTimer = null;             // опрос хода индексации
 let jobRunning = false;
 let indexRunning = false;        // у сервера уже идёт индексация
 let bookCount = 0;               // сколько книг у активного агента
+let booksCache = [];             // книги активного агента: нужны подсказкам OCR
+let ocrState = { available: false, enabled: false, version: "",
+                 languages: [], has_russian: false, install_url: "" };
 
 const MAX_OWN_PAID = 60;         // сколько платных моделей своего провайдера показывать
 const MAX_OTHER = 40;            // сколько бесплатных чужих моделей показывать на провайдера
@@ -113,7 +119,7 @@ function selectTab(name) {
     page.hidden = page.dataset.page !== name;
   });
   if (name === "agents") refreshAgents();
-  if (name === "books") refreshBooks();
+  if (name === "books") { refreshBooks(); loadOcr(); }
   if (name === "base") refreshAgents();
 }
 
@@ -305,10 +311,12 @@ async function deleteAgent(agent) {
 async function refreshBooks() {
   if (!currentSlug) {
     bookListEl.innerHTML = "";
+    booksCache = [];
     bookListEl.appendChild(el("div", "empty", "Сначала выберите или создайте агента."));
     bookFilesEl.disabled = true;
     indexBtnEl.disabled = true;
     jobEl.hidden = true;
+    renderOcrHint();
     return;
   }
   bookFilesEl.disabled = false;
@@ -321,6 +329,7 @@ async function refreshBooks() {
   }
   const books = data.books || [];
   bookCount = books.length;
+  booksCache = books;
   bookListEl.innerHTML = "";
   if (!books.length) {
     bookListEl.appendChild(el("div", "empty", data.chunks
@@ -329,6 +338,7 @@ async function refreshBooks() {
   }
   books.forEach((book) => bookListEl.appendChild(bookRow(book)));
   indexBtnEl.disabled = !books.length || indexRunning;
+  renderOcrHint();
   pollJob();
 }
 
@@ -339,6 +349,7 @@ function bookRow(book) {
   const main = el("div", "row-main");
   const title = el("div", "row-title", book.name);
   if (!book.supported) title.appendChild(el("span", "badge warn", "формат не читается"));
+  if (book.needs_ocr) title.appendChild(el("span", "badge warn", "скан"));
   main.appendChild(title);
   const state = book.chunks ? `фрагментов ${book.chunks}` : "не проиндексирована";
   main.appendChild(el("div", "row-sub", `${book.size_text || humanSize(book.size)} · ${state}`));
@@ -421,7 +432,9 @@ function uploadBooks(files) {
   });
 }
 
-indexBtnEl.addEventListener("click", async () => {
+indexBtnEl.addEventListener("click", startIndex);
+
+async function startIndex() {
   if (!currentSlug) return;
   indexBtnEl.disabled = true;
   try {
@@ -438,7 +451,7 @@ indexBtnEl.addEventListener("click", async () => {
   } finally {
     indexBtnEl.disabled = false;
   }
-});
+}
 
 /** Ход индексации: сервер отдаёт состояние, страница за ним присматривает. */
 async function pollJob() {
@@ -522,6 +535,144 @@ function renderJob(job) {
     line.appendChild(el("span", "job-extra", job.log[job.log.length - 1]));
   }
   showJob(line);
+}
+
+/* ---- OCR: распознавание сканов ---------------------------------------
+   Tesseract — отдельная программа. Сервер сообщает, установлена ли она и
+   какие языки есть; интерфейс либо включает распознавание, либо объясняет,
+   что скачать и установить, и предлагает проверить снова.
+   ---------------------------------------------------------------------- */
+async function loadOcr() {
+  try {
+    ocrState = await api("/api/ocr");
+  } catch {
+    ocrState = { available: false, enabled: false, version: "",
+                 languages: [], has_russian: false, install_url: "" };
+  }
+  renderOcr();
+}
+
+function renderOcr() {
+  const on = Boolean(ocrState.enabled && ocrState.available);
+  ocrToggleEl.classList.toggle("on", on);
+  ocrToggleEl.setAttribute("aria-checked", on ? "true" : "false");
+  ocrToggleEl.disabled = !ocrState.available;
+
+  const parts = [];
+  if (!ocrState.available) {
+    parts.push("Tesseract не найден");
+  } else {
+    parts.push(ocrState.enabled ? "включён" : "выключен");
+    if (ocrState.version) parts.push(`tesseract ${ocrState.version}`);
+    if ((ocrState.languages || []).length) parts.push(ocrState.languages.join(", "));
+  }
+  ocrStatusEl.textContent = parts.join(" · ");
+  renderOcrHint();
+}
+
+/** Подсказка под переключателем: чего не хватает и что делать дальше. */
+function renderOcrHint() {
+  ocrHintEl.innerHTML = "";
+  const scans = booksCache.filter((book) => book.needs_ocr);
+
+  if (!ocrState.available) {
+    ocrHintEl.hidden = false;
+    ocrHintEl.appendChild(el("div", "hint-title", "Чтобы читать сканы, нужен Tesseract"));
+    ocrHintEl.appendChild(el("div", "hint-text",
+      "Это бесплатная программа распознавания текста. Скачайте установщик для Windows, " +
+      "при установке отметьте дополнительный язык Russian (без него русский текст не " +
+      "распознаётся), затем нажмите «Проверить снова» — сервер подхватит программу без " +
+      "перезапуска. Обычные текстовые PDF, EPUB, TXT и FB2 работают и без неё."));
+    const link = el("a", "hint-link", "Скачать Tesseract для Windows");
+    link.href = ocrState.install_url || "https://github.com/UB-Mannheim/tesseract/wiki";
+    link.target = "_blank";
+    link.rel = "noopener";
+    ocrHintEl.appendChild(link);
+    addHintButton("Проверить снова", "ghost", "ocr-recheck");
+    return;
+  }
+
+  if (!ocrState.has_russian) {
+    ocrHintEl.hidden = false;
+    ocrHintEl.appendChild(el("div", "hint-title", "Не установлен русский язык"));
+    ocrHintEl.appendChild(el("div", "hint-text",
+      "Tesseract найден, но среди его языков нет русского (rus). Запустите установщик " +
+      "ещё раз, выберите «Additional language data» и отметьте Russian, затем нажмите " +
+      "«Проверить снова»."));
+    addHintButton("Проверить снова", "ghost", "ocr-recheck");
+    return;
+  }
+
+  if (!scans.length) {
+    ocrHintEl.hidden = true;
+    return;
+  }
+
+  const names = scans.slice(0, 3).map((book) => `«${book.name}»`).join(", ");
+  const more = scans.length > 3 ? ` и ещё ${scans.length - 3}` : "";
+  ocrHintEl.hidden = false;
+  if (!ocrState.enabled) {
+    ocrHintEl.appendChild(el("div", "hint-title", "Похоже на скан без текста"));
+    ocrHintEl.appendChild(el("div", "hint-text",
+      `${names}${more}: текстового слоя нет, искать по этим страницам без распознавания ` +
+      `не получится. Tesseract установлен — можно включить OCR.`));
+    addHintButton("Включить OCR", "primary", "ocr-enable");
+  } else {
+    ocrHintEl.appendChild(el("div", "hint-title", "OCR включён — осталось проиндексировать"));
+    ocrHintEl.appendChild(el("div", "hint-text",
+      `${names}${more}: страницы-сканы распознаются во время индексации. Это может занять ` +
+      `минуты — примерно 1–2 секунды на страницу, — зато текст появится в базе.`));
+    addHintButton("Индексировать", "primary", "ocr-index");
+  }
+}
+
+function addHintButton(text, kind, action) {
+  const button = el("button", kind, text);
+  button.type = "button";
+  button.dataset.act = action;
+  ocrHintEl.appendChild(button);
+}
+
+ocrToggleEl.addEventListener("click", toggleOcr);
+
+ocrHintEl.addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-act]");
+  if (!button) return;
+  if (button.dataset.act === "ocr-recheck") loadOcr().then(refreshBooks);
+  if (button.dataset.act === "ocr-enable") enableOcr();
+  if (button.dataset.act === "ocr-index") startIndex();
+});
+
+async function toggleOcr() {
+  if (!ocrState.available) { loadOcr(); return; }
+  const wanted = !ocrState.enabled;
+  try {
+    ocrState = await api("/api/ocr", {
+      method: "POST", headers: JSON_HEADER,
+      body: JSON.stringify({ enabled: wanted }),
+    });
+    renderOcr();
+    showNote(wanted ? "Распознавание сканов включено."
+                    : "Распознавание сканов выключено.");
+  } catch (error) {
+    showNote(error.message, "error");
+    await loadOcr();
+  }
+}
+
+async function enableOcr() {
+  try {
+    ocrState = await api("/api/ocr", {
+      method: "POST", headers: JSON_HEADER,
+      body: JSON.stringify({ enabled: true }),
+    });
+    renderOcr();
+    showNote(ocrState.has_russian ? "OCR включён — нажмите «Индексировать»."
+                                  : "OCR включён, но русского языка в tesseract нет.");
+  } catch (error) {
+    showNote(error.message, "error");
+    await loadOcr();
+  }
 }
 
 /* ---- База ------------------------------------------------------------- */

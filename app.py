@@ -23,7 +23,8 @@ from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from config import Config, load_config, resolve_llm
+from config import Config, load_config, resolve_llm, save_setting
+from core import ocr, parsers
 from core.agents import Agent, AgentError, AgentNotFound, Agents
 from core.jobs import Jobs
 from core.llm import LLMError, OpenAICompatClient
@@ -120,6 +121,13 @@ async def lifespan(app: FastAPI):
               f"{stats['sources_count']} книг")
     else:
         print("Агентов пока нет — создайте первого в настройках (⚙)")
+    engine = await asyncio.to_thread(ocr.status)
+    if engine["available"]:
+        languages = ", ".join(engine["languages"]) or "языки не найдены"
+        state = "включён" if CONFIG.store.ocr != parsers.OCR_OFF else "выключен"
+        print(f"🔎 OCR: tesseract {engine['version']} ({languages}) — {state}")
+    else:
+        print("🔎 OCR: tesseract не найден — сканы распознаваться не будут")
     print(f"Модель по умолчанию: {CONFIG.llm.model} ({CONFIG.llm.provider})")
     print(f"Открой http://localhost:{CONFIG.server.port}")
     try:
@@ -160,6 +168,10 @@ class KeyRequest(BaseModel):
 class AgentRequest(BaseModel):
     title: str
     description: str = ""
+
+
+class OcrRequest(BaseModel):
+    enabled: bool = True
 
 
 def get_client(app: FastAPI, provider: str, model: str) -> OpenAICompatClient:
@@ -307,6 +319,30 @@ async def providers():
     }
 
 
+@app.get("/api/ocr")
+async def ocr_status():
+    """Проверка tesseract: установлен ли, версия, языки, включён ли OCR."""
+    data = await asyncio.to_thread(ocr.status)
+    data["enabled"] = CONFIG.store.ocr != parsers.OCR_OFF
+    return data
+
+
+@app.post("/api/ocr")
+async def set_ocr(req: OcrRequest):
+    """Включает или выключает распознавание сканов — сразу и навсегда."""
+    mode = parsers.OCR_ON if req.enabled else parsers.OCR_OFF
+    data = await asyncio.to_thread(ocr.status)
+    if req.enabled and not data["available"]:
+        raise HTTPException(
+            status_code=409,
+            detail="Tesseract не найден. Установите его и нажмите «Проверить снова».")
+    save_setting("store", "ocr", mode)   # переживёт перезапуск сервера
+    CONFIG.store.ocr = mode
+    REGISTRY.set_ocr(mode)               # уже открытые базы тоже
+    data["enabled"] = mode != parsers.OCR_OFF
+    return data
+
+
 @app.post("/api/keys")
 async def set_key(req: KeyRequest):
     if req.provider not in {item["name"] for item in provider_catalog()}:
@@ -394,9 +430,19 @@ async def list_books(slug: str):
     for book in books:
         book["chunks"] = counts.get(book["name"], 0)
         book["size_text"] = human_size(book["size"])
+
+    def inspect(items: list[Dict[str, Any]]) -> list[Dict[str, Any]]:
+        """Проверяет, есть ли в книге текст: скан без текста — повод для OCR."""
+        for book in items:
+            report = parsers.probe(agent.books_dir / book["name"])
+            book["needs_ocr"] = report["needs_ocr"]
+        return items
+
+    await asyncio.to_thread(inspect, books)
     return {"slug": slug, "title": agent.title, "books": books,
             "chunks": sum(counts.values()),
-            "indexed": len(counts)}
+            "indexed": len(counts),
+            "needs_ocr": sum(1 for book in books if book["needs_ocr"])}
 
 
 @app.post("/api/agents/{slug}/books")

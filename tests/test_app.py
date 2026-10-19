@@ -12,6 +12,13 @@ import app as app_module
 from core.agents import Agents
 from core.store import StoreRegistry
 
+# Как отвечает проверка tesseract: установлен со всеми языками или нет.
+OCR_READY = {"available": True, "path": "tesseract", "version": "5.5.3",
+             "languages": ["eng", "rus"], "has_russian": True,
+             "install_url": "https://example.org/tesseract"}
+OCR_MISSING = {"available": False, "path": "", "version": "", "languages": [],
+               "has_russian": False, "install_url": "https://example.org/tesseract"}
+
 
 class ApiTests(unittest.TestCase):
     def setUp(self):
@@ -20,6 +27,8 @@ class ApiTests(unittest.TestCase):
         self.agents = Agents(self.temp.name)
         self.registry = Mock(spec=StoreRegistry)
         self.client = TestClient(app_module.app)
+        self.ocr_before = app_module.CONFIG.store.ocr
+        self.addCleanup(setattr, app_module.CONFIG.store, "ocr", self.ocr_before)
 
         for patcher in (
             patch.object(app_module, "AGENTS", self.agents),
@@ -139,6 +148,70 @@ class ApiTests(unittest.TestCase):
         catalog = self.client.get("/api/providers").json()
         self.assertTrue(catalog["providers"])
         self.assertTrue(catalog["default"]["provider"])
+
+    # --- OCR ----------------------------------------------------------
+
+    def test_ocr_status_is_reported(self):
+        with patch.object(app_module.ocr, "status", return_value=dict(OCR_READY)):
+            data = self.client.get("/api/ocr").json()
+
+        self.assertTrue(data["available"])
+        self.assertTrue(data["has_russian"])
+        self.assertIn("enabled", data)
+
+    def test_ocr_cannot_be_enabled_without_tesseract(self):
+        with patch.object(app_module.ocr, "status", return_value=dict(OCR_MISSING)):
+            response = self.client.post("/api/ocr", json={"enabled": True})
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("Tesseract", response.json()["detail"])
+
+    def test_ocr_can_be_turned_off_even_without_tesseract(self):
+        with patch.object(app_module.ocr, "status", return_value=dict(OCR_MISSING)), \
+             patch.object(app_module, "save_setting") as save:
+            response = self.client.post("/api/ocr", json={"enabled": False})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.json()["enabled"])
+        save.assert_called_once_with("store", "ocr", "off")
+
+    def test_enabled_ocr_is_saved_and_applied_to_open_bases(self):
+        with patch.object(app_module.ocr, "status", return_value=dict(OCR_READY)), \
+             patch.object(app_module, "save_setting") as save:
+            response = self.client.post("/api/ocr", json={"enabled": True})
+
+            self.assertEqual(response.status_code, 200)
+            self.assertTrue(response.json()["enabled"])
+            self.assertEqual(app_module.CONFIG.store.ocr, "auto")
+
+        save.assert_called_once_with("store", "ocr", "auto")
+        self.registry.set_ocr.assert_called_once_with("auto")
+
+    def test_books_report_scans_without_text_layer(self):
+        agent = self.agents.create("Кулинария")
+        self.agents.write_book(agent.slug, "скан.pdf", [b"pdf"])
+        self.registry.get.return_value.source_counts.return_value = {}
+
+        with patch.object(app_module.parsers, "probe",
+                          return_value={"readable": False, "needs_ocr": True,
+                                        "reason": "scan"}):
+            data = self.client.get(f"/api/agents/{agent.slug}/books").json()
+
+        self.assertTrue(data["books"][0]["needs_ocr"])
+        self.assertEqual(data["needs_ocr"], 1)
+
+    def test_readable_book_does_not_ask_for_ocr(self):
+        agent = self.agents.create("Кулинария")
+        self.agents.write_book(agent.slug, "книга.pdf", [b"pdf"])
+        self.registry.get.return_value.source_counts.return_value = {}
+
+        with patch.object(app_module.parsers, "probe",
+                          return_value={"readable": True, "needs_ocr": False,
+                                        "reason": "text"}):
+            data = self.client.get(f"/api/agents/{agent.slug}/books").json()
+
+        self.assertFalse(data["books"][0]["needs_ocr"])
+        self.assertEqual(data["needs_ocr"], 0)
 
 
 if __name__ == '__main__':

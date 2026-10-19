@@ -108,9 +108,7 @@ class RAGDatabase:
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
         self.formats = [suffix.lower() for suffix in (formats or parsers.SUPPORTED)]
-        self.tesseract = None if ocr == "off" else parsers.Tesseract()
-        if self.tesseract is not None and not self.tesseract.available:
-            self.tesseract = None
+        self.set_ocr(ocr)
         self.progress = progress
 
         Path(db_path).mkdir(parents=True, exist_ok=True)
@@ -134,6 +132,17 @@ class RAGDatabase:
     @embedding_model.setter
     def embedding_model(self, value) -> None:
         self._embedding_model = value
+
+    def set_ocr(self, ocr) -> None:
+        """Включает или выключает распознавание сканов на ходу.
+
+        Настройку меняют в интерфейсе, а база уже открыта: пересоздавать её
+        незачем — достаточно убрать или поднять движок распознавания.
+        """
+        self.ocr = parsers.ocr_mode(ocr)
+        self.tesseract = None if self.ocr == parsers.OCR_OFF else parsers.Tesseract()
+        if self.tesseract is not None and not self.tesseract.available:
+            self.tesseract = None
 
     def _report(self, **event: Any) -> None:
         """Сообщает о ходе индексации: веб-слой показывает это в интерфейсе."""

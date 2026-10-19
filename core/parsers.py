@@ -16,7 +16,7 @@ import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from html.parser import HTMLParser
 from pathlib import Path, PurePosixPath
-from typing import Iterator, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 import xml.etree.ElementTree as ET
 
 import pymupdf
@@ -64,6 +64,26 @@ TITLE_MAX_VERBS = 2   # в рецепте глаголов приготовле�
 OCR_LANGUAGE = "rus+eng"
 OCR_DPI = 200
 WINDOWS_TESSERACT = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+PROBE_PAGES = 8        # сколько первых страниц PDF проверяем на текстовый слой
+PROBE_MIN_WORDS = 30   # у книги с текстом на них заведомо больше слов
+
+# Как настройка OCR записана словами: "auto" — распознавать, "off" — нет.
+OCR_ON = "auto"
+OCR_OFF = "off"
+ON_WORDS = ("auto", "on", "yes", "true", "1")
+
+
+def ocr_mode(value: Any) -> str:
+    """Приводит настройку OCR к одному из двух слов: «auto» или «off».
+
+    В YAML слово off — это логическая ложь, поэтому `ocr: off` из config.yaml
+    приходит сюда как False: это тот же выключатель, и понимать его нужно так
+    же, иначе настройка молча не работает. Всё непонятное считаем выключенным —
+    распознавание стоит минут времени, включать его по опечатке не нужно.
+    """
+    if isinstance(value, bool):
+        return OCR_ON if value else OCR_OFF
+    return OCR_ON if str(value).strip().lower() in ON_WORDS else OCR_OFF
 
 
 def unit_for(path) -> str:
@@ -222,6 +242,8 @@ class Tesseract:
         self.language = language
         self.dpi = dpi
         self.workers = workers
+        self._version: Optional[str] = None
+        self._languages: Optional[List[str]] = None
         found = shutil.which("tesseract")
         if not found and Path(WINDOWS_TESSERACT).exists():
             found = WINDOWS_TESSERACT
@@ -230,6 +252,36 @@ class Tesseract:
     @property
     def available(self) -> bool:
         return bool(self.path) and Path(self.path).exists()
+
+    @property
+    def version(self) -> str:
+        """Версия tesseract («5.5.3»); пустая строка, если не запускается."""
+        if self._version is None:
+            self._version = ""
+            if self.available:
+                try:
+                    done = subprocess.run([self.path, "--version"],
+                                          capture_output=True, timeout=15)
+                    lines = done.stdout.decode("utf-8", "replace").splitlines()
+                    if lines:
+                        self._version = lines[0].replace("tesseract", "").strip()
+                except (OSError, subprocess.SubprocessError):
+                    self._version = ""
+        return self._version
+
+    @property
+    def languages(self) -> List[str]:
+        """Языки рядом с tesseract: rus, eng, ... (файлы *.traineddata)."""
+        if self._languages is None:
+            self._languages = []
+            if self.available:
+                try:
+                    folder = Path(self.path).parent / "tessdata"
+                    self._languages = sorted(
+                        item.stem for item in folder.glob("*.traineddata"))
+                except OSError:
+                    self._languages = []
+        return self._languages
 
     def text(self, image: bytes) -> str:
         """Распознаёт одну картинку (PNG) как текст."""
@@ -249,6 +301,59 @@ class Tesseract:
         workers = max(1, min(self.workers, len(images)))
         with ThreadPoolExecutor(max_workers=workers) as pool:
             return list(pool.map(self.text, images))
+
+
+# Проверка книги запоминается до изменения файла: список книг открывают часто.
+_PROBE_CACHE: Dict[Tuple[str, int, int], Dict[str, Any]] = {}
+
+
+def probe(path) -> Dict[str, Any]:
+    """Читается ли книга без распознавания: есть ли в PDF текстовый слой.
+
+    Смотрим первые страницы: у обычной книги на них сотни слов, у скана —
+    почти ничего. Это и есть повод предложить включить OCR. Остальные форматы
+    (EPUB, TXT, FB2) текстовые — им распознавание не нужно.
+    """
+    file = Path(path)
+    suffix = file.suffix.lower()
+    if suffix not in SUPPORTED:
+        return {"readable": False, "needs_ocr": False, "reason": "format"}
+    if suffix != ".pdf":
+        return {"readable": True, "needs_ocr": False, "reason": "text"}
+    try:
+        stamp = file.stat()
+    except OSError:
+        return {"readable": False, "needs_ocr": False, "reason": "missing"}
+
+    key = (str(file.resolve()), stamp.st_size, stamp.st_mtime_ns)
+    cached = _PROBE_CACHE.get(key)
+    if cached is not None:
+        return dict(cached)
+
+    pages = 0
+    words = 0
+    try:
+        with pymupdf.open(file) as doc:
+            for number, page in enumerate(doc, 1):
+                if number > PROBE_PAGES:
+                    break
+                pages += 1
+                words += len(ANY_LETTER_WORD.findall(page.get_text()))
+    except Exception:            # битый файл: пусть решает индексация
+        return {"readable": False, "needs_ocr": False, "reason": "broken"}
+
+    needs_ocr = pages > 0 and words < PROBE_MIN_WORDS
+    report = {
+        "readable": not needs_ocr,
+        "needs_ocr": needs_ocr,
+        "reason": "scan" if needs_ocr else "text",
+        "pages": pages,
+        "words": words,
+    }
+    if len(_PROBE_CACHE) > 500:
+        _PROBE_CACHE.clear()
+    _PROBE_CACHE[key] = report
+    return dict(report)
 
 
 def _decode(raw: bytes) -> str:

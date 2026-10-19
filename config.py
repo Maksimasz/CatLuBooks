@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 from dataclasses import dataclass, field, fields
@@ -12,6 +13,7 @@ from typing import Any, Dict, List, Type, TypeVar
 
 import yaml
 
+from core.parsers import ocr_mode
 from core.providers import base_url_for, key_for
 
 # На консоли Windows (cp866/cp1251) печать эмодзи падает с UnicodeEncodeError.
@@ -20,6 +22,11 @@ for _stream in (sys.stdout, sys.stderr):
         _stream.reconfigure(errors="replace")
 
 DEFAULT_CONFIG_PATH = "config.yaml"
+
+# Настройки, выбранные в интерфейсе (например OCR), важнее config.yaml.
+# Файл локальный: в git не попадает.
+ROOT = Path(__file__).resolve().parent
+SETTINGS_PATH = ROOT / "settings.json"
 
 DEFAULT_SYSTEM = (
     "Ты — полезный ассистент. Отвечай на русском языке. "
@@ -127,6 +134,69 @@ def resolve_llm(base: LLMConfig, provider: str | None = None,
     return llm
 
 
+def load_settings() -> Dict[str, Any]:
+    """Локальные настройки из интерфейса (settings.json)."""
+    try:
+        data = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def save_setting(section: str, name: str, value: Any) -> None:
+    """Запоминает настройку из интерфейса: она переживёт перезапуск сервера."""
+    data = load_settings()
+    block = data.get(section)
+    if not isinstance(block, dict):
+        block = {}
+    block[name] = value
+    data[section] = block
+    SETTINGS_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2),
+                             encoding="utf-8")
+
+
+def _coerce(current: Any, value: Any) -> Any:
+    """Приводит значение из файла к типу поля: файл могут править руками."""
+    if isinstance(current, bool):
+        return bool(value)
+    if isinstance(current, int):
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return current
+    if isinstance(current, float):
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return current
+    if isinstance(current, str):
+        return str(value)
+    if isinstance(current, list) and isinstance(value, list):
+        return [str(item) for item in value]
+    return current
+
+
+def _apply_settings(cfg: Config) -> None:
+    """Накладывает settings.json поверх config.yaml (только известные поля)."""
+    for section, block in load_settings().items():
+        target = getattr(cfg, section, None)
+        if target is None or not isinstance(block, dict):
+            continue
+        known = {item.name for item in fields(type(target))}
+        for name, value in block.items():
+            if name in known:
+                setattr(target, name, _coerce(getattr(target, name), value))
+
+
+def _normalize(cfg: Config) -> None:
+    """Приводит к словам настройки, которые YAML понимает иначе.
+
+    `ocr: off` в config.yaml — это логическая ложь (так уж устроен YAML), а для
+    нас это тот же выключатель распознавания сканов.
+    """
+    cfg.store.ocr = ocr_mode(cfg.store.ocr)
+
+
 def load_config(path: str | None = None) -> Config:
     """Читает YAML-конфиг (по умолчанию config.yaml) и возвращает Config."""
     path = path or os.environ.get("RAG_CONFIG", DEFAULT_CONFIG_PATH)
@@ -143,20 +213,22 @@ def load_config(path: str | None = None) -> Config:
         search=_from_dict(SearchConfig, raw.get("search")),
         server=_from_dict(ServerConfig, raw.get("server")),
     )
+    _normalize(cfg)          # YAML: off — это False, приводим настройку к слову
+    _apply_settings(cfg)     # поверх — выбор из интерфейса
+    _normalize(cfg)          # и его тоже: settings.json могут править руками
     _resolve_llm(cfg.llm)
     return cfg
 
 
 if __name__ == "__main__":
-    import json
-
     cfg = load_config()
     print(json.dumps(
         {
             "provider": cfg.llm.provider,
             "model": cfg.llm.model,
             "base_url": cfg.llm.base_url,
-            "collection": cfg.store.collection,
+            "agents_root": cfg.store.agents_root,
+            "ocr": cfg.store.ocr,
             "embeddings": cfg.embeddings.model,
             "server": f"{cfg.server.host}:{cfg.server.port}",
         },

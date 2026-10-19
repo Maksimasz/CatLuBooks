@@ -9,7 +9,7 @@
   <link rel="manifest" href="/manifest.webmanifest">
   <link rel="icon" href="/icon-192.png">
   <link rel="apple-touch-icon" href="/icon-192.png">
-  <link rel="stylesheet" href="/style.css?v=7">
+  <link rel="stylesheet" href="/style.css?v=8">
 </head>
 <body>
   <header class="topbar">
@@ -71,6 +71,19 @@
             </label>
             <button id="index-btn" class="primary" type="button">Индексировать</button>
           </div>
+
+          <div class="setting-row">
+            <div class="setting-main">
+              <div class="setting-title">Распознавать сканы (OCR)</div>
+              <div class="setting-sub" id="ocr-status">проверяю tesseract…</div>
+            </div>
+            <button id="ocr-toggle" class="switch" type="button" role="switch"
+                    aria-checked="false" aria-label="Распознавать сканы">
+              <span class="switch-knob"></span>
+            </button>
+          </div>
+          <div id="ocr-hint" class="ocr-hint" hidden></div>
+
           <div id="job" class="job" hidden></div>
           <div id="book-list" class="list"></div>
           <p class="note">Индексировать — значит прочитать книги и положить их в базу
@@ -110,6 +123,6 @@
     </div>
   </div>
 
-  <script src="/app.js?v=7"></script>
+  <script src="/app.js?v=8"></script>
 </body>
 </html>

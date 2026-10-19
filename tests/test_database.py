@@ -316,5 +316,42 @@ class FolderTests(unittest.TestCase):
         self.assertEqual(events[-1]['chunks'], 42)
 
 
+class OcrSwitchTests(unittest.TestCase):
+    """Распознавание сканов переключается у уже открытой базы."""
+
+    def setUp(self):
+        self.db = module.RAGDatabase.__new__(module.RAGDatabase)
+
+    def test_tesseract_appears_and_disappears_on_demand(self):
+        engine = Mock(available=True)
+        with patch.object(module.parsers, 'Tesseract',
+                          return_value=engine) as factory:
+            self.db.set_ocr('auto')
+            self.assertIs(self.db.tesseract, engine)
+            self.assertEqual(self.db.ocr, 'auto')
+
+            self.db.set_ocr('off')
+
+        self.assertIsNone(self.db.tesseract)
+        self.assertEqual(self.db.ocr, 'off')
+        factory.assert_called_once()          # второй раз движок не создаём
+
+    def test_enabling_without_tesseract_does_not_break(self):
+        with patch.object(module.parsers, 'Tesseract',
+                          return_value=Mock(available=False)):
+            self.db.set_ocr('auto')
+
+        self.assertIsNone(self.db.tesseract)
+
+    def test_yaml_off_switches_ocr_off(self):
+        """`ocr: off` из config.yaml приходит как False: OCR должен выключиться."""
+        with patch.object(module.parsers, 'Tesseract') as factory:
+            self.db.set_ocr(False)
+
+        self.assertEqual(self.db.ocr, 'off')
+        self.assertIsNone(self.db.tesseract)
+        factory.assert_not_called()
+
+
 if __name__ == '__main__':
     unittest.main()

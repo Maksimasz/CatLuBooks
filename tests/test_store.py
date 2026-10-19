@@ -75,6 +75,16 @@ class RegistryTests(unittest.TestCase):
         coding._db.close.assert_called_once()
         self.assertEqual(registry._stores, {})
 
+    def test_ocr_switch_reaches_every_open_database(self):
+        with patch("core.store.RAGDatabase", side_effect=lambda **kw: Mock()):
+            registry = StoreRegistry(self.cfg, self.agents)
+            store = registry.get("kulinariya")
+
+            registry.set_ocr("auto")
+
+        store._db.set_ocr.assert_called_once_with("auto")
+        self.assertEqual(self.cfg.store.ocr, "auto")   # новые базы тоже с OCR
+
     def test_index_and_delete_are_delegated_to_the_database(self):
         with patch("core.store.RAGDatabase") as database:
             registry = StoreRegistry(self.cfg, self.agents)

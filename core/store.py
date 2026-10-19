@@ -12,6 +12,7 @@ from __future__ import annotations
 from typing import Any, Callable, Dict, List, Optional
 
 from config import Config
+from core import parsers
 from core.agents import Agents
 from core.database import BOOKS_COLLECTION, RAGDatabase, embedding_model_for
 
@@ -133,6 +134,13 @@ class StoreRegistry:
     def ensure_model(self):
         """Заранее грузит модель эмбеддингов: первый вопрос не будет ждать."""
         return embedding_model_for(self.cfg.embeddings.model)
+
+    def set_ocr(self, ocr) -> None:
+        """Переключает распознавание сканов у всех уже открытых баз."""
+        ocr = parsers.ocr_mode(ocr)
+        self.cfg.store.ocr = ocr
+        for store in self._stores.values():
+            store._db.set_ocr(ocr)
 
     def forget(self, slug: str) -> None:
         """Закрывает базу агента — нужно перед удалением его папки."""
