@@ -483,6 +483,7 @@ button:disabled { opacity: .45; cursor: default; }
   white-space: nowrap;
 }
 .row-actions { display: flex; gap: 4px; flex: 0 0 auto; }
+.row.reading .row-sub { color: var(--accent); }
 .badge {
   font-size: 11px;
   color: var(--accent);

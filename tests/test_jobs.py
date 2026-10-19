@@ -32,6 +32,21 @@ class JobTests(unittest.TestCase):
         self.assertTrue(any("Плов.pdf" in line for line in data["log"]))
         self.assertTrue(any("скан.pdf" in line for line in data["log"]))
 
+    def test_chunks_counter_starts_from_zero_for_each_book(self):
+        """«в этой книге» — про текущую книгу: у следующей счётчик с нуля."""
+        job = self.jobs.start("cooking")
+        self.jobs.apply(job, {"event": "file", "source": "первая.pdf",
+                              "index": 1, "total": 2})
+        self.jobs.apply(job, {"event": "chunks", "saved": 120})
+        self.jobs.apply(job, {"event": "file_done", "source": "первая.pdf",
+                              "chunks": 120})
+        self.jobs.apply(job, {"event": "file", "source": "вторая.pdf",
+                              "index": 2, "total": 2})
+
+        self.assertEqual(job.chunks, 0)
+        self.assertEqual(job.file, "вторая.pdf")
+        self.assertEqual(job.index, 2)
+
     def test_error_event_marks_the_job_failed(self):
         job = self.jobs.start("cooking")
         self.jobs.apply(job, {"event": "error", "message": "в папке нет книг"})

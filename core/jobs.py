@@ -89,6 +89,9 @@ class Jobs:
         elif kind == "file":
             job.index = int(event.get("index") or 0)
             job.file = str(event.get("source") or "")
+            # Счётчик фрагментов — про текущую книгу: у новой книги он с нуля,
+            # иначе интерфейс показывал бы ей число прошлой книги.
+            job.chunks = 0
             job._log(f"[{job.index}/{job.total}] {job.file}")
         elif kind == "chunks":
             job.chunks = int(event.get("saved") or 0)

@@ -49,6 +49,8 @@ let defaultModel = "";
 let jobTimer = null;             // опрос хода индексации
 let jobRunning = false;
 let indexRunning = false;        // у сервера уже идёт индексация
+let indexFile = "";              // какую книгу сервер читает прямо сейчас
+let jobTicks = 0;                // сколько раз спросили сервер (для редких обновлений списка)
 let bookCount = 0;               // сколько книг у активного агента
 let booksCache = [];             // книги активного агента: нужны подсказкам OCR
 let ocrLoaded = false;           // ответил ли сервер про tesseract
@@ -84,6 +86,14 @@ function humanSize(size) {
   while (value >= 1024 && unit < units.length - 1) { value /= 1024; unit += 1; }
   return unit === 0 ? `${Math.round(value)} ${units[unit]}`
                     : `${value.toFixed(1)} ${units[unit]}`;
+}
+
+/** «3 мин 20 с» — чтобы во время индексации было видно, что работа идёт. */
+function humanTime(seconds) {
+  const total = Math.round(Number(seconds) || 0);
+  const minutes = Math.floor(total / 60);
+  if (!minutes) return `${total} с`;
+  return `${minutes} мин ${total % 60} с`;
 }
 
 const agentBySlug = (slug) => agents.find((agent) => agent.slug === slug) || null;
@@ -343,17 +353,62 @@ async function refreshBooks() {
   pollJob();
 }
 
+/** Подновляет подписи книг во время индексации, не перестраивая список:
+    видно, какая книга читается и сколько из неё уже записано, а прокрутка
+    списка при этом не сбивается. */
+async function refreshBookStates() {
+  if (!currentSlug) return;
+  const slug = currentSlug;
+  let data;
+  try {
+    data = await api(`/api/agents/${encodeURIComponent(slug)}/books`);
+  } catch {
+    return;
+  }
+  if (slug !== currentSlug) return;
+  booksCache = data.books || [];
+  bookCount = booksCache.length;
+  applyBookStates();
+  renderOcrHint();
+}
+
+function applyBookStates() {
+  const byName = new Map(booksCache.map((book) => [book.name, book]));
+  bookListEl.querySelectorAll(".row").forEach((row) => {
+    const book = byName.get(row.dataset.name);
+    if (!book) return;
+    const sub = row.querySelector(".row-sub");
+    if (sub) sub.textContent = bookLine(book);
+    row.classList.toggle("reading", isReading(book));
+  });
+}
+
+const isReading = (book) => Boolean(indexRunning) && book.name === indexFile;
+
+/** Подпись книги: размер и что с ней уже сделали (или делают сейчас). */
+function bookLine(book) {
+  return `${book.size_text || humanSize(book.size)} · ${bookState(book)}`;
+}
+
+function bookState(book) {
+  if (isReading(book)) {
+    return book.chunks ? `фрагментов ${book.chunks} — читается сейчас` : "читается сейчас…";
+  }
+  if (book.chunks) return `фрагментов ${book.chunks}`;
+  return indexRunning ? "в очереди" : "не проиндексирована";
+}
+
 function bookRow(book) {
   const row = el("div", "row");
   row.dataset.name = book.name;
+  row.classList.toggle("reading", isReading(book));
 
   const main = el("div", "row-main");
   const title = el("div", "row-title", book.name);
   if (!book.supported) title.appendChild(el("span", "badge warn", "формат не читается"));
   if (book.needs_ocr) title.appendChild(el("span", "badge warn", "скан"));
   main.appendChild(title);
-  const state = book.chunks ? `фрагментов ${book.chunks}` : "не проиндексирована";
-  main.appendChild(el("div", "row-sub", `${book.size_text || humanSize(book.size)} · ${state}`));
+  main.appendChild(el("div", "row-sub", bookLine(book)));
   row.appendChild(main);
 
   const actions = el("div", "row-actions");
@@ -470,12 +525,18 @@ async function pollJob() {
 
   if (running) {
     indexRunning = true;
+    indexFile = job.file || "";
     indexBtnEl.disabled = true;
     renderJob(job);
+    jobTicks += 1;
+    // Раз в пять секунд подновляем и список книг: он должен показывать,
+    // какая книга читается и сколько из неё уже записано.
+    if (jobTicks % 5 === 0) refreshBookStates();
     jobTimer = setTimeout(pollJob, 1000);
   } else if (jobRunning) {
     jobRunning = false;             // индексация только что закончилась
     indexRunning = false;
+    indexFile = "";
     indexBtnEl.disabled = !bookCount;
     if (job) renderJob(job);
     refreshBooks();
@@ -516,9 +577,9 @@ function renderJob(job) {
   } else if (error) {
     label = `Не получилось: ${job.error || "неизвестная ошибка"}`;
   } else if (done) {
-    label = `Готово: ${job.chunks} фрагментов` + (failed ? `, сбоев ${failed}` : "");
+    label = `Готово: в базе ${job.chunks} фрагментов` + (failed ? `, сбоев ${failed}` : "");
   } else if (job.file) {
-    label = `Индексация ${job.index}/${job.total || "?"}: ${job.file}`;
+    label = `Читаю книгу ${job.index} из ${job.total || "?"}: ${job.file}`;
   } else {
     label = "Индексация: готовлюсь…";
   }
@@ -531,7 +592,11 @@ function renderJob(job) {
     fill.style.width = `${Math.round(percent * 100)}%`;
     bar.appendChild(fill);
     line.appendChild(bar);
-    if (job.chunks) line.appendChild(el("span", "job-extra", `записано фрагментов: ${job.chunks}`));
+    // Фрагменты считаются по текущей книге: в базе лежат и прошлые книги.
+    const parts = [];
+    if (job.chunks) parts.push(`в этой книге: ${job.chunks} фрагментов`);
+    if (job.seconds) parts.push(`идёт ${humanTime(job.seconds)}`);
+    if (parts.length) line.appendChild(el("span", "job-extra", parts.join(" · ")));
   } else if (error && job.log && job.log.length) {
     line.appendChild(el("span", "job-extra", job.log[job.log.length - 1]));
   }
