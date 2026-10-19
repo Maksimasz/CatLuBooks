@@ -36,6 +36,10 @@ const historyListEl = document.getElementById("history-list");
 const historyClearEl = document.getElementById("history-clear");
 const overlayEl = document.getElementById("overlay");
 const overlayTextEl = document.getElementById("overlay-text");
+const sourcesToggleEl = document.getElementById("sources-toggle");
+const sourcesPanelEl = document.getElementById("sources-panel");
+const sourcesPanelListEl = document.getElementById("sources-panel-list");
+const sourcesCloseEl = document.getElementById("sources-close");
 const baseClearEl = document.getElementById("base-clear");
 const agentRenameEl = document.getElementById("agent-rename");
 const agentDeleteEl = document.getElementById("agent-delete");
@@ -910,7 +914,6 @@ setInterval(async () => {
                            : "Сервер недоступен. Проверьте, запущен ли он.");
   } else if (!overlayEl.hidden) {
     hideOverlay();
-    if (restarting) { restarting = false; location.reload(); }
   }
 }, 3000);
 
@@ -987,17 +990,25 @@ serverStopEl.addEventListener("click", async () => {
   }
 });
 
+let reloading = false;        // страница уже перезагружается
+
 /** Ждёт, пока сервер снова ответит, и перезагружает страницу. */
 async function waitForServer() {
   const started = Date.now();
-  while (Date.now() - started < 60000) {
+  while (Date.now() - started < 120000) {
     try {
       const response = await fetch("/health", { cache: "no-store" });
-      if (response.ok) { location.reload(); return; }
+      if (response.ok && !reloading) {
+        reloading = true;
+        location.reload();
+        return;
+      }
     } catch { /* сервер ещё поднимается */ }
-    await new Promise((resolve) => setTimeout(resolve, 700));
+    await new Promise((resolve) => setTimeout(resolve, 500));
   }
-  showNote("Сервер не ответил за минуту. Запустите его на компьютере: uv run python app.py", "error");
+  if (!reloading) {
+    showNote("Сервер не ответил за две минуты. Запустите его на компьютере: uv run python app.py", "error");
+  }
 }
 
 /* ---- История поиска --------------------------------------------------- */
@@ -1056,8 +1067,9 @@ function historyItem(entry) {
   if (entry.sources && entry.sources.length) {
     const src = el("div", "sources");
     const list = el("div", "src-list");
-    (entry.sources || []).forEach((group) => {
+    (entry.sources || []).forEach((group, i) => {
       const row = el("div", "src-row");
+      row.appendChild(el("span", "src-index", `[${i + 1}]`));
       row.appendChild(el("span", "src-file", group.file || ""));
       row.appendChild(el("span", "src-page",
         group.page != null ? `${group.unit || "стр."} ${group.page}` : ""));
@@ -1437,10 +1449,16 @@ function shortSource(name) {
   return text || String(name);
 }
 
-/** Источники — внизу ответа, номера совпадают со ссылками в тексте ответа. */
+/** Источники — в боковой панели справа, номера совпадают со ссылками [N] в ответе. */
 function addSources(wrap, sources) {
   const found = (sources || []).filter((source) => source && source.source);
-  if (!found.length) return;
+  if (!found.length) {
+    sourcesPanelListEl.innerHTML = "";
+    sourcesPanelListEl.appendChild(el("div", "sources-empty",
+      "Источников нет."));
+    sourcesToggleEl.disabled = true;
+    return;
+  }
 
   const groups = [];
   const byKey = new Map();
@@ -1461,28 +1479,29 @@ function addSources(wrap, sources) {
     if (source.index != null) group.indexes.push(source.index);
   }
 
-  const box = el("details", "sources");
-  box.open = true;
-  const title = el("summary", "sources-head", `📚 Источники · ${groups.length}`);
-  title.title = "Нумерация совпадает со ссылками «Источник N» в ответе";
-  box.appendChild(title);
-
-  const list = el("div", "source-list");
-  for (const group of groups) {
+  sourcesPanelListEl.innerHTML = "";
+  groups.forEach((group, i) => {
     const row = el("div", "source");
-    row.appendChild(el("span", "src-index", group.indexes.join(", ") || "•"));
+    row.appendChild(el("span", "src-index", `[${group.indexes.join(", ") || i + 1}]`));
     const name = el("span", "src-name", shortSource(group.source));
     const snippet = group.snippet ? `\n\n${group.snippet.trim()}` : "";
     name.title = `${group.source}${snippet}`;
     row.appendChild(name);
     row.appendChild(el("span", "src-page",
       group.page != null ? `${group.unit} ${group.page}` : ""));
-    list.appendChild(row);
-  }
-  box.appendChild(list);
-  (wrap.querySelector(".col") || wrap).appendChild(box);
+    sourcesPanelListEl.appendChild(row);
+  });
+  sourcesToggleEl.disabled = false;
+  sourcesPanelEl.hidden = false;
   chatEl.scrollTop = chatEl.scrollHeight;
 }
+
+sourcesToggleEl.addEventListener("click", () => {
+  sourcesPanelEl.hidden = !sourcesPanelEl.hidden;
+});
+sourcesCloseEl.addEventListener("click", () => {
+  sourcesPanelEl.hidden = true;
+});
 
 /** Последний элемент ответа: в него дописываем мигающий курсор. */
 function tailOf(node) {

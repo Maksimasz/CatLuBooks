@@ -9,13 +9,15 @@
   <link rel="manifest" href="/manifest.webmanifest">
   <link rel="icon" href="/icon-192.png">
   <link rel="apple-touch-icon" href="/icon-192.png">
-  <link rel="stylesheet" href="/style.css?v=20">
+  <link rel="stylesheet" href="/style.css?v=22">
 </head>
 <body>
   <header class="topbar">
     <div class="brand"><span class="dot"></span> CatLuBooks</div>
     <div class="controls">
       <select id="agent" title="Агент: своя база знаний"></select>
+      <button id="sources-toggle" class="sources-toggle" type="button"
+              title="Источники, использованные в ответе">Источники</button>
       <button id="model-label" class="model-label" type="button"
               title="Модель и подключения — откроется в настройках"></button>
       <button id="gear" class="icon" type="button" title="Настройки" aria-label="Настройки">
@@ -37,6 +39,15 @@
     <textarea id="input" rows="1" placeholder="Спросите что-нибудь…" autocomplete="off"></textarea>
     <button id="send" type="submit" aria-label="Отправить">➤</button>
   </form>
+
+  <aside id="sources-panel" class="sources-panel" hidden>
+    <div class="sources-panel-head">
+      <span>Источники</span>
+      <button id="sources-close" class="icon" type="button" title="Закрыть"
+              aria-label="Закрыть">✕</button>
+    </div>
+    <div id="sources-panel-list" class="sources-panel-list"></div>
+  </aside>
 
   <div id="overlay" class="overlay" hidden>
     <div class="overlay-card">
@@ -162,6 +173,6 @@
     </div>
   </div>
 
-  <script src="/app.js?v=20"></script>
+  <script src="/app.js?v=22"></script>
 </body>
 </html>
