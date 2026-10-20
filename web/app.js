@@ -112,6 +112,17 @@ function humanTime(seconds) {
   return `${minutes} мин ${total % 60} с`;
 }
 
+/** Список «ключ — значение»: вкладки «База» и «Сервер» показывают одно и то же. */
+function renderStats(container, rows) {
+  container.innerHTML = "";
+  rows.forEach(([key, value]) => {
+    const row = el("div", "stat");
+    row.appendChild(el("span", "stat-key", key));
+    row.appendChild(el("span", "stat-value", value));
+    container.appendChild(row);
+  });
+}
+
 const agentBySlug = (slug) => agents.find((agent) => agent.slug === slug) || null;
 const currentProvider = () => providerEl.value;
 const currentModel = () => modelEl.value.trim();
@@ -425,6 +436,16 @@ function bookState(book) {
   return indexRunning ? "в очереди" : "не проиндексирована";
 }
 
+/** Кнопка удаления книги: только файл (📄) или вместе с фрагментами (🗑). */
+function deleteButton(icon, mode, title) {
+  const button = el("button", mode === "full" ? "icon danger" : "icon", icon);
+  button.type = "button";
+  button.dataset.act = "delete";
+  button.dataset.mode = mode;
+  button.title = title;
+  return button;
+}
+
 function bookRow(book) {
   const row = el("div", "row");
   row.dataset.name = book.name;
@@ -441,26 +462,13 @@ function bookRow(book) {
 
   const actions = el("div", "row-actions");
   if (book.missing) {
-    const remove = el("button", "icon danger", "🗑");
-    remove.type = "button";
-    remove.dataset.act = "delete";
-    remove.dataset.mode = "full";
-    remove.title = "Убрать фрагменты из базы (файла уже нет)";
-    actions.appendChild(remove);
+    actions.appendChild(deleteButton("🗑", "full",
+      "Убрать фрагменты из базы (файла уже нет)"));
   } else {
-    const fileOnly = el("button", "icon", "📄");
-    fileOnly.type = "button";
-    fileOnly.dataset.act = "delete";
-    fileOnly.dataset.mode = "file";
-    fileOnly.title = "Удалить только файл с диска — фрагменты в базе останутся";
-    actions.appendChild(fileOnly);
-
-    const full = el("button", "icon danger", "🗑");
-    full.type = "button";
-    full.dataset.act = "delete";
-    full.dataset.mode = "full";
-    full.title = "Удалить книгу и её фрагменты из базы";
-    actions.appendChild(full);
+    actions.appendChild(deleteButton("📄", "file",
+      "Удалить только файл с диска — фрагменты в базе останутся"));
+    actions.appendChild(deleteButton("🗑", "full",
+      "Удалить книгу и её фрагменты из базы"));
   }
   row.appendChild(actions);
   return row;
@@ -878,7 +886,6 @@ async function enableOcr() {
 /* ---- База ------------------------------------------------------------- */
 function renderBase() {
   const agent = agentBySlug(currentSlug);
-  baseStatsEl.innerHTML = "";
   const indexed = !agent ? "—"
     : agent.books ? `${agent.indexed} из ${agent.books}`
     : agent.indexed ? `${agent.indexed} книг (файлы уже не в папке)`
@@ -892,12 +899,7 @@ function renderBase() {
     ["Занимает", agent.size_text],
     ["Создан", agent.created || "—"],
   ] : [["Агент", "не выбран"]];
-  rows.forEach(([key, value]) => {
-    const row = el("div", "stat");
-    row.appendChild(el("span", "stat-key", key));
-    row.appendChild(el("span", "stat-value", value));
-    baseStatsEl.appendChild(row);
-  });
+  renderStats(baseStatsEl, rows);
   baseClearEl.disabled = !agent || !agent.chunks;
   agentRenameEl.disabled = !agent;
   agentDeleteEl.disabled = !agent;
@@ -1006,7 +1008,6 @@ async function refreshServer() {
 }
 
 function renderServerStatus(data) {
-  serverStatusEl.innerHTML = "";
   const uptime = humanTime(data.uptime);
   const rows = [
     ["Адрес для телефона", data.lan_url || "нет (ПК не в сети?)"],
@@ -1017,12 +1018,7 @@ function renderServerStatus(data) {
     ["Python", data.python],
     ["Папка проекта", data.folder],
   ];
-  rows.forEach(([key, value]) => {
-    const row = el("div", "stat");
-    row.appendChild(el("span", "stat-key", key));
-    row.appendChild(el("span", "stat-value", value));
-    serverStatusEl.appendChild(row);
-  });
+  renderStats(serverStatusEl, rows);
   if (data.start_command) {
     serverCommandEl.hidden = false;
     serverCommandEl.textContent = "Запустить вручную:\n" + data.start_command;
@@ -1542,7 +1538,7 @@ function shortSource(name) {
 }
 
 /** Источники — в боковой панели справа, номера совпадают со ссылками [N] в ответе. */
-function addSources(wrap, sources) {
+function addSources(sources) {
   const found = (sources || []).filter((source) => source && source.source);
   if (!found.length) {
     sourcesPanelListEl.innerHTML = "";
@@ -1698,7 +1694,7 @@ async function streamChat(message, prior) {
   }
 
   renderAnswer(bubble, text, false);
-  if (sources) addSources(wrap, sources);
+  if (sources) addSources(sources);
   // Найденный ответ сохраняется в историю, чтобы потом не искать снова.
   if (text && currentSlug && !text.includes("⚠️")) {
     saveHistory(message, text, sources);

@@ -214,29 +214,14 @@ body {
 }
 @keyframes blink { to { visibility: hidden; } }
 
-/* Источники — внизу ответа, номера как в ссылках «Источник N» */
-.sources {
-  width: 100%;
-  padding: 8px 0 0;
-  border-top: 1px solid var(--line);
-  font-size: 13px;
-}
-.sources-head {
-  color: var(--muted);
-  cursor: pointer;
-  list-style: none;
-  user-select: none;
-}
-.sources-head::-webkit-details-marker { display: none; }
-.sources-head::before { content: "▾ "; color: var(--dim); }
-.sources:not([open]) .sources-head::before { content: "▸ "; }
-.source-list { margin-top: 6px; }
+/* Источники — в боковой панели, номера как ссылки [N] в ответе */
 .source { display: flex; align-items: baseline; gap: 8px; padding: 2px 0; }
 .src-index {
-  color: var(--dim);
+  color: var(--accent);
   min-width: 3ch;
   text-align: right;
   font-variant-numeric: tabular-nums;
+  font-weight: 600;
 }
 .src-name {
   flex: 1;
@@ -247,13 +232,6 @@ body {
   color: #bdbdbd;
 }
 .src-page { color: var(--text); white-space: nowrap; }
-.src-index {
-  color: var(--accent);
-  min-width: 3ch;
-  text-align: right;
-  font-variant-numeric: tabular-nums;
-  font-weight: 600;
-}
 
 /* Переключатель режима сведения: Выкл / Быстро / Точно */
 .merge-switch {
@@ -325,30 +303,11 @@ body {
   padding: 8px 16px;
 }
 .sources-panel-list .source {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
   padding: 6px 0;
   border-bottom: 1px solid var(--line);
   font-size: 13px;
 }
 .sources-panel-list .source:last-child { border-bottom: none; }
-.sources-panel-list .src-index {
-  color: var(--accent);
-  min-width: 3ch;
-  text-align: right;
-  font-variant-numeric: tabular-nums;
-  font-weight: 600;
-}
-.sources-panel-list .src-name {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: #bdbdbd;
-}
-.sources-panel-list .src-page { color: var(--text); white-space: nowrap; }
 .sources-panel-list .sources-empty {
   color: var(--muted);
   font-size: 13px;

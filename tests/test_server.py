@@ -1,10 +1,7 @@
 """Проверки управления самим сервером: адреса, перезапуск, остановка."""
-import contextlib
-import io
 import os
 import signal
 import socket
-import tempfile
 import threading
 import unittest
 from unittest.mock import Mock, patch

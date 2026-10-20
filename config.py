@@ -188,6 +188,9 @@ def resolve_llm(base: LLMConfig, provider: str | None = None,
         temperature=base.temperature,
         top_p=base.top_p,
         max_tokens=base.max_tokens,
+        timeout=base.timeout,
+        merge_timeout=base.merge_timeout,
+        merge_max_tokens=base.merge_max_tokens,
     )
     _resolve_llm(llm)
     return llm

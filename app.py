@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
 from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -87,11 +87,11 @@ def human_size(size: int) -> str:
     return f"{value:.1f} ГБ"
 
 
-def http_error(exc: AgentError) -> HTTPException:
-    """Ошибки агентов: «нет такого» — 404, остальное — просьба исправить ввод."""
-    if isinstance(exc, AgentNotFound):
-        return HTTPException(status_code=404, detail=str(exc))
-    return HTTPException(status_code=400, detail=str(exc))
+def mark_scans(agent: Agent, books: list[Dict[str, Any]]) -> None:
+    """Помечает сканы без текстового слоя: им поможет OCR."""
+    for book in books:
+        book["needs_ocr"] = (False if book.get("missing")
+                             else parsers.probe(agent.books_dir / book["name"])["needs_ocr"])
 
 
 def agent_store(slug: Optional[str]) -> Tuple[Agent, VectorStore]:
@@ -103,15 +103,11 @@ def agent_store(slug: Optional[str]) -> Tuple[Agent, VectorStore]:
     if not slug:
         found = AGENTS.list()
         if not found:
-            raise HTTPException(
-                status_code=404,
-                detail="Агентов пока нет. Нажмите ⚙ в правом верхнем углу и создайте первого.")
+            raise AgentNotFound(
+                "Агентов пока нет. Нажмите ⚙ в правом верхнем углу и создайте первого.")
         slug = found[0].slug
-    try:
-        agent = AGENTS.get(slug)
-        return agent, REGISTRY.get(agent.slug)
-    except AgentError as exc:
-        raise http_error(exc) from exc
+    agent = AGENTS.get(slug)
+    return agent, REGISTRY.get(agent.slug)
 
 
 @asynccontextmanager
@@ -145,6 +141,13 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="RAG Ассистент", lifespan=lifespan)
+
+
+@app.exception_handler(AgentError)
+async def agent_error_handler(request: Request, exc: AgentError) -> JSONResponse:
+    """Ошибки агентов — понятным текстом: «нет такого» это 404, остальное — 400."""
+    status = 404 if isinstance(exc, AgentNotFound) else 400
+    return JSONResponse(status_code=status, content={"detail": str(exc)})
 
 
 class ChatMessage(BaseModel):
@@ -231,8 +234,8 @@ async def stream_chat(req: ChatRequest, app: FastAPI):
 
     try:
         agent, store = agent_store(req.agent)
-    except HTTPException as exc:
-        yield sse("error", {"message": exc.detail})
+    except AgentError as exc:
+        yield sse("error", {"message": str(exc)})
         yield sse("done", {})
         return
 
@@ -477,41 +480,29 @@ async def list_agents():
 
 @app.post("/api/agents")
 async def create_agent(req: AgentRequest):
-    try:
-        agent = await asyncio.to_thread(AGENTS.create, req.title, req.description)
-    except AgentError as exc:
-        raise http_error(exc) from exc
+    agent = await asyncio.to_thread(AGENTS.create, req.title, req.description)
     return agent.as_dict()
 
 
 @app.patch("/api/agents/{slug}")
 async def rename_agent(slug: str, req: AgentRequest):
-    try:
-        agent = await asyncio.to_thread(AGENTS.rename, slug, req.title)
-    except AgentError as exc:
-        raise http_error(exc) from exc
+    agent = await asyncio.to_thread(AGENTS.rename, slug, req.title)
     return agent.as_dict()
 
 
 @app.delete("/api/agents/{slug}")
 async def delete_agent(slug: str):
-    try:
-        AGENTS.get(slug)
-        await asyncio.to_thread(REGISTRY.forget, slug)  # закрыть базу агента
-        await asyncio.to_thread(AGENTS.delete, slug)
-    except AgentError as exc:
-        raise http_error(exc) from exc
+    AGENTS.get(slug)
+    await asyncio.to_thread(REGISTRY.forget, slug)  # закрыть базу агента
+    await asyncio.to_thread(AGENTS.delete, slug)
     return {"ok": True}
 
 
 @app.get("/api/agents/{slug}/books")
 async def list_books(slug: str):
     """Книги агента и сколько фрагментов каждой уже в базе."""
-    try:
-        agent = AGENTS.get(slug)
-        counts = await asyncio.to_thread(REGISTRY.get(slug).source_counts)
-    except AgentError as exc:
-        raise http_error(exc) from exc
+    agent = AGENTS.get(slug)
+    counts = await asyncio.to_thread(REGISTRY.get(slug).source_counts)
     books = await asyncio.to_thread(AGENTS.books, slug)
     for book in books:
         book["chunks"] = counts.get(book["name"], 0)
@@ -527,17 +518,7 @@ async def list_books(slug: str):
         books.append({"name": name, "size": 0, "size_text": "",
                       "supported": True, "chunks": counts[name], "missing": True})
 
-    def inspect(items: list[Dict[str, Any]]) -> list[Dict[str, Any]]:
-        """Проверяет, есть ли в книге текст: скан без текста — повод для OCR."""
-        for book in items:
-            if book.get("missing"):
-                book["needs_ocr"] = False
-                continue
-            report = parsers.probe(agent.books_dir / book["name"])
-            book["needs_ocr"] = report["needs_ocr"]
-        return items
-
-    await asyncio.to_thread(inspect, books)
+    await asyncio.to_thread(mark_scans, agent, books)
     return {"slug": slug, "title": agent.title, "books": books,
             "chunks": sum(counts.values()),
             "indexed": len(counts),
@@ -573,16 +554,13 @@ async def delete_book(slug: str, name: str = Query(min_length=1), mode: str = Qu
     if mode not in ("file", "full"):
         raise HTTPException(status_code=400,
                             detail="Режим удаления: file (только файл) или full (файл и база)")
-    try:
-        if mode == "file":
-            gone = await asyncio.to_thread(AGENTS.remove_book, slug, name)
-            if not gone:
-                raise HTTPException(status_code=404, detail=f"Файла «{name}» нет")
-            return {"ok": True, "removed": 0, "file": True, "mode": "file"}
-        removed = await asyncio.to_thread(REGISTRY.get(slug).delete_source, name)
+    if mode == "file":
         gone = await asyncio.to_thread(AGENTS.remove_book, slug, name)
-    except AgentError as exc:
-        raise http_error(exc) from exc
+        if not gone:
+            raise HTTPException(status_code=404, detail=f"Файла «{name}» нет")
+        return {"ok": True, "removed": 0, "file": True, "mode": "file"}
+    removed = await asyncio.to_thread(REGISTRY.get(slug).delete_source, name)
+    gone = await asyncio.to_thread(AGENTS.remove_book, slug, name)
     if not gone and not removed:
         raise HTTPException(status_code=404, detail=f"Книги «{name}» нет ни в базе, ни в папке")
     return {"ok": True, "removed": removed, "file": gone, "mode": "full"}
@@ -594,10 +572,7 @@ async def index_agent(slug: str, full: bool = False):
 
     Уже прочитанные книги пропускаются; full=true перечитывает всё заново.
     """
-    try:
-        agent = AGENTS.get(slug)
-    except AgentError as exc:
-        raise http_error(exc) from exc
+    agent = AGENTS.get(slug)
 
     running = JOBS.latest(slug)
     if running is not None and running.state == "running":
@@ -623,10 +598,7 @@ async def index_agent(slug: str, full: bool = False):
 @app.get("/api/agents/{slug}/job")
 async def job_status(slug: str):
     """Ход последней индексации агента (интерфейс спрашивает раз в секунду)."""
-    try:
-        AGENTS.get(slug)
-    except AgentError as exc:
-        raise http_error(exc) from exc
+    AGENTS.get(slug)
     job = JOBS.latest(slug)
     return {"job": job.as_dict() if job else None}
 
@@ -634,10 +606,7 @@ async def job_status(slug: str):
 @app.delete("/api/agents/{slug}/base")
 async def clear_base(slug: str):
     """Очищает базу агента; книги на диске остаются."""
-    try:
-        removed = await asyncio.to_thread(REGISTRY.get(slug).clear)
-    except AgentError as exc:
-        raise http_error(exc) from exc
+    removed = await asyncio.to_thread(REGISTRY.get(slug).clear)
     return {"ok": True, "removed": removed}
 
 
@@ -653,10 +622,7 @@ class HistoryEntry(BaseModel):
 @app.get("/api/agents/{slug}/history")
 async def list_history(slug: str, limit: int = 50, offset: int = 0):
     """Сохранённые ответы агента: чтобы не искать снова."""
-    try:
-        agent = AGENTS.get(slug)
-    except AgentError as exc:
-        raise http_error(exc) from exc
+    agent = AGENTS.get(slug)
     entries = await asyncio.to_thread(history_load, str(agent.path))
     return {"slug": slug, "total": len(entries),
             "entries": entries[offset:offset + limit]}
@@ -665,10 +631,7 @@ async def list_history(slug: str, limit: int = 50, offset: int = 0):
 @app.post("/api/agents/{slug}/history")
 async def save_history(slug: str, req: HistoryEntry):
     """Сохраняет ответ (вопрос + ответ + источники) в историю агента."""
-    try:
-        agent = AGENTS.get(slug)
-    except AgentError as exc:
-        raise http_error(exc) from exc
+    agent = AGENTS.get(slug)
     if not req.question.strip():
         raise HTTPException(status_code=400, detail="Вопрос пуст")
     entry = await asyncio.to_thread(
@@ -681,10 +644,7 @@ async def save_history(slug: str, req: HistoryEntry):
 @app.delete("/api/agents/{slug}/history/{entry_id}")
 async def delete_history_entry(slug: str, entry_id: str):
     """Удаляет одну запись из истории."""
-    try:
-        agent = AGENTS.get(slug)
-    except AgentError as exc:
-        raise http_error(exc) from exc
+    agent = AGENTS.get(slug)
     removed = await asyncio.to_thread(history_delete, str(agent.path), entry_id)
     if not removed:
         raise HTTPException(status_code=404,
@@ -695,10 +655,7 @@ async def delete_history_entry(slug: str, entry_id: str):
 @app.delete("/api/agents/{slug}/history")
 async def clear_history(slug: str):
     """Очищает всю историю агента."""
-    try:
-        agent = AGENTS.get(slug)
-    except AgentError as exc:
-        raise http_error(exc) from exc
+    agent = AGENTS.get(slug)
     removed = await asyncio.to_thread(history_clear, str(agent.path))
     return {"ok": True, "removed": removed}
 

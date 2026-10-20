@@ -58,6 +58,16 @@ class SettingsTests(unittest.TestCase):
 
         self.assertEqual(cfg.store.chunk_size, 1500)
 
+    def test_switching_model_keeps_configured_timeouts(self):
+        """Смена модели в интерфейсе не должна сбрасывать llm.timeout из YAML."""
+        base = config.LLMConfig(timeout=640, merge_timeout=1200, merge_max_tokens=700)
+
+        llm = config.resolve_llm(base, "groq", "some-model")
+
+        self.assertEqual(llm.timeout, 640)
+        self.assertEqual(llm.merge_timeout, 1200)
+        self.assertEqual(llm.merge_max_tokens, 700)
+
     def test_off_without_quotes_is_still_off(self):
         """YAML читает `off` как False: настройка не должна молча означать «включено»."""
         path = self.write_config("store:\n  ocr: off\n")
