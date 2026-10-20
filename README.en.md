@@ -9,7 +9,7 @@ phone (installable as a PWA).
 > The interface itself is in Russian. UI labels are quoted below exactly as they
 > appear on screen, so you can find them: ⚙ → Книги means the "Books" tab.
 
-**Quick links:** [install](#install) ·
+**Quick links:** [beginner's guide](docs/GUIDE.en.md) · [install](#install) ·
 [migration to another computer](#migration-to-another-computer) ·
 [building the database](#building-the-database) ·
 [configuration](#configuration-configyaml)
