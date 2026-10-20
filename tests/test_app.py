@@ -2,6 +2,7 @@
 
 Базы агентов подменены заглушкой: тесты не поднимают ни ChromaDB, ни модель.
 """
+import json
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
@@ -360,6 +361,74 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(response.json()["removed"], 2)
         data = self.client.get(f"/api/agents/{agent.slug}/history").json()
         self.assertEqual(data["total"], 0)
+
+
+class _FakeLLM:
+    """Модель, которая отвечает заранее заданными кусками."""
+
+    def __init__(self, answers):
+        self.answers = list(answers)   # [(куски текста, finish_reason), ...]
+        self.calls = 0
+        self.finish_reason = None
+
+    async def stream(self, messages):
+        pieces, reason = self.answers[self.calls]
+        self.calls += 1
+        self.finish_reason = reason
+        for piece in pieces:
+            yield piece
+
+
+class ChatContinuationTests(unittest.IsolatedAsyncioTestCase):
+    """Ответ, упёршийся в лимит токенов, дописывается, а не обрывается."""
+
+    @staticmethod
+    def make_store():
+        store = Mock()
+        store.search.return_value = [
+            {"id": "1", "document": "рецепт", "metadata": {"source": "книга.pdf"}}]
+        store.format_context.return_value = "КОНТЕКСТ"
+        store.sources.return_value = [{"source": "книга.pdf"}]
+        return store
+
+    async def ask(self, answers):
+        request = app_module.ChatRequest(message="котлета по киевски", history=[])
+        llm = _FakeLLM(answers)
+        agent = Mock(title="Кулинария", slug="kulinariya")
+        merge_before = app_module.CONFIG.search.merge_mode
+        app_module.CONFIG.search.merge_mode = "off"
+        self.addCleanup(setattr, app_module.CONFIG.search, "merge_mode", merge_before)
+        with patch.object(app_module, "agent_store",
+                          return_value=(agent, self.make_store())), \
+             patch.object(app_module, "get_client", return_value=llm), \
+             patch.object(app_module, "save_last_request"), \
+             patch("builtins.print"):
+            events = [event async for event in
+                      app_module.stream_chat(request, app_module.app)]
+        return llm, events
+
+    @staticmethod
+    def answer(events):
+        pieces = []
+        for event in events:
+            if event.startswith("event: token"):
+                pieces.append(json.loads(event.split("data: ", 1)[1])["text"])
+        return "".join(pieces)
+
+    async def test_truncated_answer_is_continued(self):
+        llm, events = await self.ask([(["Первая часть."], "length"),
+                                      ([" Вторая часть."], "stop")])
+
+        self.assertEqual(self.answer(events), "Первая часть. Вторая часть.")
+        self.assertEqual(llm.calls, 2)
+        self.assertIn("event: stage", "".join(events))
+
+    async def test_finished_answer_is_not_continued(self):
+        llm, events = await self.ask([(["Целый ответ."], "stop")])
+
+        self.assertEqual(self.answer(events), "Целый ответ.")
+        self.assertEqual(llm.calls, 1)
+        self.assertNotIn("event: stage", "".join(events))
 
 
 if __name__ == '__main__':

@@ -52,6 +52,12 @@ LOG_DIR = Path(__file__).resolve().parent / "logs"
 LAST_REQUEST = LOG_DIR / "last_request.json"
 UPLOAD_CHUNK = 1 << 20  # загружаем книги по мегабайту, а не целиком в память
 
+# Просьба дописать ответ, если модель упёрлась в лимит токенов.
+CONTINUE_PROMPT = (
+    "Продолжи ответ ровно с того места, где он оборвался. "
+    "Не повторяй уже написанное и не начинай заново."
+)
+
 CONFIG: Config = load_config()
 AGENTS = Agents(CONFIG.store.agents_root)
 REGISTRY = StoreRegistry(CONFIG, AGENTS)
@@ -199,6 +205,23 @@ def get_client(app: FastAPI, provider: str, model: str,
     return client
 
 
+def search_query(req: ChatRequest) -> str:
+    """Текст для поиска: короткое уточнение ищется вместе с прошлым вопросом.
+
+    «Почему рецепт не до конца» само по себе не содержит темы — без прошлого
+    вопроса поиск уходит в случайные книги и отвечает «такого рецепта нет».
+    """
+    question = req.message.strip()
+    low = question.lower()
+    cues = ("продолж", "подробн", "уточн", "не до конца", "не доконца",
+            "ещё", "еще", "почему", "зачем")
+    if not (low.startswith(("почему", "зачем")) or any(cue in low for cue in cues)):
+        return question
+    previous = next((msg.content.strip() for msg in reversed(req.history)
+                     if msg.role == "user" and msg.content.strip()), "")
+    return f"{previous} {question}".strip() if previous else question
+
+
 def build_messages(req: ChatRequest, context: str,
                    template: str | None = None) -> list[dict]:
     """Собирает сообщения для модели: system + история + текущий вопрос."""
@@ -254,14 +277,15 @@ async def stream_chat(req: ChatRequest, app: FastAPI):
 
 
     try:
+        query = search_query(req)
         if merging:
             # Разные книги: один рецепт в десяти источниках — десять
             # вариантов, из которых можно собрать один хороший.
             results = await asyncio.to_thread(
-                store.search_diverse, req.message, CONFIG.search.merge_sources)
+                store.search_diverse, query, CONFIG.search.merge_sources)
             context = store.format_context(results, CONFIG.search.merge_context_chars)
         else:
-            results = await asyncio.to_thread(store.search, req.message, None)
+            results = await asyncio.to_thread(store.search, query, None)
             context = store.format_context(results)
     except Exception as exc:
         yield sse("error", {"message": f"Ошибка поиска: {exc}"})
@@ -311,6 +335,7 @@ async def stream_chat(req: ChatRequest, app: FastAPI):
                 build_messages(req, context, CONFIG.prompt.synthesis_template),
                 max_tokens=CONFIG.llm.merge_max_tokens)
         except LLMError as exc:
+            print(f"⚠️ Модель: {exc}")
             yield sse("error", {"message": str(exc)})
             yield sse("done", {})
             return
@@ -324,13 +349,30 @@ async def stream_chat(req: ChatRequest, app: FastAPI):
                     else CONFIG.prompt.merge_template)
 
     answer: list[str] = []
+    messages = build_messages(req, context, template)
     try:
-        async for piece in llm.stream(build_messages(req, context, template)):
+        async for piece in llm.stream(messages):
             answer.append(piece)
             yield sse("token", {"text": piece})
+        # Модель упёрлась в лимит токенов — просим продолжение: полный рецепт
+        # по-русски длиннее одного ответа, а обрыв на полуслове бесполезен.
+        for _ in range(CONFIG.llm.max_continuations):
+            if llm.finish_reason != "length":
+                break
+            yield sse("stage", {"text": "Ответ длинный — дописываю продолжение…"})
+            messages = build_messages(req, context, template) + [
+                {"role": "assistant", "content": "".join(answer)},
+                {"role": "user", "content": CONTINUE_PROMPT},
+            ]
+            async for piece in llm.stream(messages):
+                answer.append(piece)
+                yield sse("token", {"text": piece})
     except LLMError as exc:
+        print(f"⚠️ Модель: {exc}")
+        record["ошибка"] = str(exc)
         yield sse("error", {"message": str(exc)})
     record["ответ"] = "".join(answer)
+    record["обрыв"] = llm.finish_reason == "length"
     save_last_request(record)
     yield sse("done", {})
 

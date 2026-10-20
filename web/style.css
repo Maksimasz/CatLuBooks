@@ -203,6 +203,8 @@ body {
 }
 .table-wrap tr:last-child td { border-bottom: none; }
 
+.stage { color: var(--muted); font-size: 13px; }
+
 .cursor {
   display: inline-block;
   width: 8px;

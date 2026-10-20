@@ -29,6 +29,8 @@ class OpenAICompatClient:
         self.temperature = cfg.temperature
         self.top_p = cfg.top_p
         self.max_tokens = cfg.max_tokens
+        # Почему модель остановилась: "stop" — сама, "length" — упёрлась в лимит.
+        self.finish_reason: str | None = None
 
         headers = {"Content-Type": "application/json"}
         if cfg.api_key:
@@ -64,7 +66,6 @@ class OpenAICompatClient:
             payload["max_tokens"] = max_tokens
         try:
             response = await self._client.post("chat/completions", json=payload)
-            response.raise_for_status()
         except httpx.TimeoutException as exc:
             raise LLMError(
                 f"Модель «{self.model}» не ответила за отведённое время. "
@@ -78,51 +79,84 @@ class OpenAICompatClient:
                 f"{': ' + detail if detail else ''}"
             ) from exc
 
+        if response.status_code >= 400:
+            raise LLMError(self._error_text(
+                response.status_code, response.text,
+                response.headers.get("retry-after")))
+
         try:
             data = response.json()
         except ValueError as exc:
             raise LLMError("Модель вернула ответ в неизвестном формате") from exc
 
         try:
-            return data["choices"][0]["message"]["content"].strip()
+            choice = data["choices"][0]
+            self.finish_reason = choice.get("finish_reason")
+            return choice["message"]["content"].strip()
         except (KeyError, IndexError, TypeError) as exc:
             raise LLMError(f"Неожиданная структура ответа модели: {data}") from exc
 
     async def stream(self, messages: List[Dict[str, str]]) -> AsyncIterator[str]:
         """Стриминг ответа: выдаёт кусочки текста по мере генерации."""
+        self.finish_reason = None
         try:
             async with self._client.stream(
                 "POST", "chat/completions", json=self._payload(messages, True)
             ) as response:
                 if response.status_code >= 400:
                     body = (await response.aread()).decode("utf-8", "replace")
-                    raise LLMError(
-                        f"Модель ответила ошибкой {response.status_code}: {body[:300]}"
-                    )
+                    raise LLMError(self._error_text(
+                        response.status_code, body,
+                        response.headers.get("retry-after")))
                 async for line in response.aiter_lines():
-                    piece = self._parse_line(line)
+                    piece, reason = self._parse_chunk(line)
+                    if reason:
+                        self.finish_reason = reason
                     if piece:
                         yield piece
         except httpx.HTTPError as exc:
             raise LLMError(f"Ошибка соединения с моделью: {exc}") from exc
 
     @staticmethod
-    def _parse_line(line: str) -> str:
-        """Разбирает одну строку SSE и возвращает кусок текста (или пусто)."""
+    def _error_text(status: int, body: str, retry_after: str | None = None) -> str:
+        """Понятное сообщение провайдера вместо куска JSON.
+
+        У бесплатных тарифов частый ответ — 429 с лимитом токенов в минуту;
+        в JSON лежит готовое объяснение, его и показываем.
+        """
+        message = body.strip()
+        try:
+            data = json.loads(body)
+        except ValueError:
+            data = {}
+        error = data.get("error") if isinstance(data, dict) else None
+        if isinstance(error, dict) and error.get("message"):
+            message = str(error["message"])
+        elif isinstance(error, str) and error:
+            message = error
+        text = f"Модель ответила ошибкой {status}: {message[:400]}"
+        if retry_after:
+            text += f"\nЛимит провайдера — повторите через {retry_after} с."
+        return text
+
+    @staticmethod
+    def _parse_chunk(line: str) -> tuple[str, str | None]:
+        """Разбирает строку SSE: кусок текста и причину остановки (если есть)."""
         if not line or not line.startswith("data:"):
-            return ""
+            return "", None
         chunk = line[5:].strip()
         if chunk == "[DONE]":
-            return ""
+            return "", None
         try:
             obj = json.loads(chunk)
         except ValueError:
-            return ""
+            return "", None
         choices = obj.get("choices") or []
         if not choices:
-            return ""
-        delta = choices[0].get("delta") or {}
-        return delta.get("content") or ""
+            return "", None
+        choice = choices[0]
+        delta = choice.get("delta") or {}
+        return delta.get("content") or "", choice.get("finish_reason")
 
     async def aclose(self) -> None:
         await self._client.aclose()

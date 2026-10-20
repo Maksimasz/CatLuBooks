@@ -1629,11 +1629,24 @@ function parseEvent(block) {
 }
 
 async function streamChat(message, prior) {
-  const { wrap, bubble } = addMessage("assistant", "");
+  const { wrap, bubble, col } = addMessage("assistant", "");
   renderAnswer(bubble, "", true);
 
   let text = "";
   let sources = null;
+  let stageEl = null;
+
+  /** Промежуточный шаг — отдельной строкой над ответом, а не внутри текста. */
+  const showStage = (message) => {
+    if (!stageEl) {
+      stageEl = el("div", "stage");
+      col.insertBefore(stageEl, bubble);
+    }
+    stageEl.textContent = "⏳ " + message;
+  };
+  const hideStage = () => {
+    if (stageEl) { stageEl.remove(); stageEl = null; }
+  };
 
   let response;
   try {
@@ -1675,15 +1688,15 @@ async function streamChat(message, prior) {
       if (!ev) continue;
 
       if (ev.event === "token") {
+        hideStage();
         text += ev.data.text || "";
         renderAnswer(bubble, text, true);
         chatEl.scrollTop = chatEl.scrollHeight;
       } else if (ev.event === "sources") {
         sources = ev.data;
       } else if (ev.event === "stage") {
-        // Сообщение о промежуточном шаге (сведение в два прохода).
-        text += (text ? "\n\n" : "") + "⏳ " + (ev.data.text || "");
-        renderAnswer(bubble, text, true);
+        // Промежуточный шаг (сведение в два прохода, дописывание ответа).
+        showStage(ev.data.text || "");
       } else if (ev.event === "model") {
         setStatus(`${ev.data.provider} · ${ev.data.model} · агент «${ev.data.agent}»`);
       } else if (ev.event === "error") {
@@ -1693,6 +1706,7 @@ async function streamChat(message, prior) {
     }
   }
 
+  hideStage();
   renderAnswer(bubble, text, false);
   if (sources) addSources(sources);
   // Найденный ответ сохраняется в историю, чтобы потом не искать снова.

@@ -262,5 +262,29 @@ class BuildMessagesTests(unittest.TestCase):
         self.assertEqual([m['role'] for m in messages].count('system'), 1)
 
 
+class SearchQueryTests(unittest.TestCase):
+    """Уточняющий вопрос ищется вместе с тем, к чему он относится."""
+
+    def test_followup_question_is_searched_with_the_previous_one(self):
+        request = app_module.ChatRequest(
+            message='почему рецепт не доконца',
+            history=[app_module.ChatMessage(role='user', content='котлета по киевски')])
+
+        self.assertEqual(app_module.search_query(request),
+                         'котлета по киевски почему рецепт не доконца')
+
+    def test_new_question_keeps_its_own_topic(self):
+        request = app_module.ChatRequest(
+            message='томатный суп',
+            history=[app_module.ChatMessage(role='user', content='котлета по киевски')])
+
+        self.assertEqual(app_module.search_query(request), 'томатный суп')
+
+    def test_followup_without_history_stays_as_is(self):
+        request = app_module.ChatRequest(message='продолжи', history=[])
+
+        self.assertEqual(app_module.search_query(request), 'продолжи')
+
+
 if __name__ == '__main__':
     unittest.main()
