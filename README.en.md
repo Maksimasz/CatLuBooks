@@ -30,9 +30,9 @@ question ─► search (vector + exact matches) ────────┤
 
 ## Features
 
-- **Agents**: each one has its own folder, its own books and its own database,
-  so different subjects never mix (for example "Документы" and "Заметки"
-  side by side).
+- **Agents**: each one has its own folder, its own books, its own database and
+  its own prompt, so different subjects never mix (for example "Документы" and
+  "Заметки" side by side).
 - Everything is managed from the interface (⚙ in the top right corner): create
   an agent, upload and delete books, start indexing, enter a key and choose a
   model. No console or file manager required.
@@ -59,7 +59,7 @@ question ─► search (vector + exact matches) ────────┤
 ```
 agents/
 └── dokumenty/          # agent: a folder with a Latin name
-    ├── agent.json      # title and description for the interface
+    ├── agent.json      # title, description and the agent's own prompt
     ├── books/          # the agent's books (uploaded from the interface)
     └── db/             # this agent's database (ChromaDB)
 ```
@@ -70,6 +70,42 @@ agent is gone. The folder name is transliterated from the title ("Докумен
 `dokumenty`); if the title repeats, a number is appended (`dokumenty-2`).
 
 The `agents/` folder is not tracked by git: it holds your books and databases.
+
+### Agent prompt
+
+Every agent has its own prompt. When you create one you type not only the title
+but also the subject — what the documents are about — and the model writes a
+system prompt for that subject:
+
+- a datasheet agent gets a prompt about pinouts, tolerances and soldering;
+- a contracts agent — about clauses, deadlines and references to articles;
+- a cookbook agent — about ingredients and the cooking order.
+
+The prompt lives in `agent.json` next to the title:
+
+```json
+{
+  "title": "Documents",
+  "description": "connector datasheets and soldering instructions",
+  "prompt": "You are an assistant for technical documentation…",
+  "created": "2026-10-20 12:00"
+}
+```
+
+Edit it in ⚙ → Агенты, the "Промпт агента" field: "Сохранить" stores the text,
+"Составить заново" asks the model to write the prompt again for the subject in
+the field next to it. The subject is stored too, so the model keeps the context
+on the next rewrite.
+
+The prompt is composed right after the agent is created, but in the background:
+you can upload and index books without waiting for the model (a local CPU model
+needs a minute for this, a cloud one takes seconds).
+
+If the model is unavailable (no key, Ollama is not running), the agent is still
+created: the prompt comes from the `prompt.agent_default_system` template and
+the reason is shown in the interface. An empty prompt means the shared
+`prompt.system` from `config.yaml` is used — that is how agents created before
+per-agent prompts keep working.
 
 ## Project layout
 
@@ -82,7 +118,8 @@ CatLuBooks/
 │   ├── database.py     # indexing books and searching
 │   ├── parsers.py      # reads PDF, EPUB, TXT, FB2 (+ OCR of scans)
 │   ├── ocr.py          # checks tesseract: version and languages
-│   ├── agents.py       # agents: folders, books, names
+│   ├── agents.py       # agents: folders, books, names, agent prompt
+│   ├── promptgen.py    # prompt for a new agent: model task and cleanup
 │   ├── jobs.py         # background indexing progress for the interface
 │   ├── llm.py          # generative model client
 │   ├── providers.py    # provider registry and API keys
@@ -386,17 +423,18 @@ python app.py
 
 | Block | What it sets |
 |---|---|
-| `prompt` | the assistant's subject and behaviour (system prompt and templates) |
+| `prompt` | the shared prompt (used when an agent has none), the prompt-writing task, answer templates |
 | `store` | the agents folder, book formats, chunk sizes, OCR |
 | `embeddings` | the local embedding model |
-| `llm` | provider, model, generation parameters |
+| `llm` | provider, model, generation parameters and timeouts |
 | `search` | how many chunks to retrieve, context limit, history, search mode, source merging |
 | `server` | address and port |
 
 **This computer only, no network access** — `server.host: 127.0.0.1`.
 
-**Changing the subject** — the `prompt` block only. **Changing the model** —
-`llm.model`. **Changing the provider** — `llm.provider`.
+**Changing the subject** — the agent prompt in ⚙ → Агенты (each agent has its
+own). **Changing the model** — `llm.model`. **Changing the provider** —
+`llm.provider`.
 
 ## Model providers
 
@@ -501,9 +539,12 @@ A local model on the CPU needs time: a normal answer fits into `llm.timeout`
 answer you get "the model did not respond in the allotted time", raise that
 number in `config.yaml` or reduce `search.merge_context_chars`.
 
-Merging prompts live in `config.yaml` (`prompt.merge_template`,
-`prompt.synthesis_template`, `prompt.answer_from_draft_template`) — you can
-rewrite them for your own subject.
+Merging prompts can be rewritten in `config.yaml` — keys
+`prompt.merge_template`, `prompt.synthesis_template`,
+`prompt.answer_from_draft_template` (the defaults live in `config.py` and suit
+any subject: recipes, datasheets, contracts). The agent's own prompt is set
+separately — it lives with the agent, see
+[Agent prompt](#agent-prompt).
 
 Tables of contents, back-of-book indexes and OCR garbage no longer reach the
 database at all — `core/parsers.py` filters them out during indexing. Just in

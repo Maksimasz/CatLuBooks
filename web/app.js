@@ -16,8 +16,14 @@ const panelCloseEl = document.getElementById("panel-close");
 const panelNoteEl = document.getElementById("panel-note");
 const tabsEl = document.getElementById("tabs");
 const agentTitleEl = document.getElementById("agent-title");
+const agentTopicEl = document.getElementById("agent-topic");
 const agentCreateEl = document.getElementById("agent-create");
 const agentListEl = document.getElementById("agent-list");
+const agentPromptEl = document.getElementById("agent-prompt");
+const agentPromptTopicEl = document.getElementById("agent-prompt-topic");
+const agentPromptStatusEl = document.getElementById("agent-prompt-status");
+const agentPromptSaveEl = document.getElementById("agent-prompt-save");
+const agentPromptComposeEl = document.getElementById("agent-prompt-compose");
 const bookFilesEl = document.getElementById("book-files");
 const indexBtnEl = document.getElementById("index-btn");
 const reindexBtnEl = document.getElementById("reindex-btn");
@@ -193,6 +199,7 @@ async function refreshAgents() {
   if (currentSlug) localStorage.setItem("catlu.agent", currentSlug);
   renderAgentSelect();
   renderAgentList();
+  renderAgentPrompt();
   renderBase();
   setComposerEnabled(Boolean(currentSlug));
   refreshStats();
@@ -280,9 +287,94 @@ function switchAgent(slug) {
   chatEl.innerHTML = "";
   agentEl.value = slug;
   renderAgentList();
+  renderAgentPrompt();
   renderBase();
   refreshStats();
   refreshBooks();
+}
+
+/* ---- Промпт агента: свой у каждого раздела знаний --------------------- */
+function renderAgentPrompt() {
+  const agent = agentBySlug(currentSlug);
+  agentPromptEl.disabled = !agent;
+  agentPromptTopicEl.disabled = !agent;
+  agentPromptSaveEl.disabled = !agent;
+  agentPromptComposeEl.disabled = !agent;
+  // Не затираем то, что человек печатает прямо сейчас: список агентов
+  // обновляется и после фоновой индексации.
+  if (document.activeElement !== agentPromptEl) {
+    agentPromptEl.value = agent ? (agent.prompt || "") : "";
+  }
+  if (document.activeElement !== agentPromptTopicEl) {
+    agentPromptTopicEl.value = agent ? (agent.description || "") : "";
+  }
+  agentPromptStatusEl.textContent = !agent
+    ? "выберите агента"
+    : (agent.prompt
+        ? "свой промпт — можно поправить"
+        : "своего промпта нет: работает общий из config.yaml");
+}
+
+function replaceAgent(updated) {
+  agents = agents.map((item) => (item.slug === updated.slug ? { ...item, ...updated } : item));
+  renderAgentList();
+  if (updated.slug === currentSlug) renderAgentPrompt();
+}
+
+agentPromptSaveEl.addEventListener("click", async () => {
+  const agent = agentBySlug(currentSlug);
+  if (!agent) return;
+  try {
+    const updated = await api(`/api/agents/${encodeURIComponent(agent.slug)}/prompt`, {
+      method: "PUT", headers: JSON_HEADER,
+      body: JSON.stringify({
+        prompt: agentPromptEl.value,
+        description: agentPromptTopicEl.value,
+      }),
+    });
+    replaceAgent(updated);
+    showNote("Промпт сохранён");
+  } catch (error) {
+    showNote(error.message, "error");
+  }
+});
+
+agentPromptComposeEl.addEventListener("click", async () => {
+  const agent = agentBySlug(currentSlug);
+  if (!agent) return;
+  agentPromptComposeEl.disabled = true;
+  const label = agentPromptComposeEl.textContent;
+  agentPromptComposeEl.textContent = "Составляю…";
+  try {
+    await composePromptFor(agent.slug, agentPromptTopicEl.value);
+  } finally {
+    agentPromptComposeEl.textContent = label;
+    agentPromptComposeEl.disabled = false;
+  }
+});
+
+/* Промпт составляет модель: у облака это секунды, у локальной модели на CPU —
+   до нескольких минут, поэтому создание агента его не ждёт. */
+async function composePromptFor(slug, description) {
+  const agent = agentBySlug(slug);
+  if (!agent) return null;
+  try {
+    const updated = await api(`/api/agents/${encodeURIComponent(slug)}/prompt`, {
+      method: "POST", headers: JSON_HEADER,
+      body: JSON.stringify({
+        description,
+        provider: currentProvider(),
+        model: currentModel(),
+      }),
+    });
+    replaceAgent(updated);
+    showNote(updated.prompt_error ||
+      `Промпт агента «${updated.title}» составлен и сохранён`);
+    return updated;
+  } catch (error) {
+    showNote(`Промпт не составлен: ${error.message}`, "error");
+    return null;
+  }
 }
 
 agentCreateEl.addEventListener("click", createAgent);
@@ -292,24 +384,34 @@ agentTitleEl.addEventListener("keydown", (event) => {
 
 async function createAgent() {
   const title = agentTitleEl.value.trim();
+  const topic = agentTopicEl.value.trim();
   if (!title) { agentTitleEl.focus(); return; }
   agentCreateEl.disabled = true;
+  agentCreateEl.textContent = "Создаю…";
   try {
     const agent = await api("/api/agents", {
-      method: "POST", headers: JSON_HEADER, body: JSON.stringify({ title }),
+      method: "POST", headers: JSON_HEADER,
+      body: JSON.stringify({
+        title, description: topic, generate_prompt: false,
+      }),
     });
     agentTitleEl.value = "";
+    agentTopicEl.value = "";
     currentSlug = agent.slug;
     localStorage.setItem("catlu.agent", agent.slug);
     history.length = 0;
     chatEl.innerHTML = "";
     await refreshAgents();
     selectTab("books");             // дальше обычно загружают книги
-    showNote(`Агент «${agent.title}» создан: папка ${agent.folder}. Загрузите книги и нажмите «Индексировать».`);
+    // Промпт составляет модель, и на слабом CPU это может занять минуту:
+    // папку агента не держим из-за этого, книги можно загружать сразу.
+    showNote(`Агент «${agent.title}» создан. Загрузите книги и нажмите «Индексировать».`);
+    composePromptFor(agent.slug, topic);
   } catch (error) {
     showNote(error.message, "error");
   } finally {
     agentCreateEl.disabled = false;
+    agentCreateEl.textContent = "Создать";
   }
 }
 

@@ -9,7 +9,7 @@
   <link rel="manifest" href="/manifest.webmanifest">
   <link rel="icon" href="/icon-192.png">
   <link rel="apple-touch-icon" href="/icon-192.png">
-  <link rel="stylesheet" href="/style.css?v=28">
+  <link rel="stylesheet" href="/style.css?v=29">
 </head>
 <body>
   <header class="topbar">
@@ -77,10 +77,29 @@
             <input id="agent-title" placeholder="Название агента, например Документы" autocomplete="off">
             <button id="agent-create" class="primary" type="button">Создать</button>
           </div>
+          <div class="row-new">
+            <input id="agent-topic" placeholder="Тема: что за документы — например даташиты разъёмов и инструкции по пайке" autocomplete="off">
+          </div>
           <div id="agent-list" class="list"></div>
-          <p class="note">Агент — это отдельная база знаний: своя папка с книгами и своя
-            база внутри неё. Папка создаётся латиницей из названия, поэтому английские
-            версии надёжнее для переноса базы на другой компьютер.</p>
+
+          <div class="setting-row">
+            <div class="setting-main">
+              <div class="setting-title">Промпт агента</div>
+              <div class="setting-sub" id="agent-prompt-status">выберите агента</div>
+            </div>
+          </div>
+          <textarea id="agent-prompt" class="prompt-box" rows="7"
+                    placeholder="Как агент отвечает: по каким документам, как ссылается на источники…"></textarea>
+          <div class="row-new">
+            <input id="agent-prompt-topic" placeholder="Тема агента — по ней модель составит промпт" autocomplete="off">
+          </div>
+          <div class="row-new">
+            <button id="agent-prompt-save" class="primary" type="button">Сохранить</button>
+            <button id="agent-prompt-compose" class="ghost" type="button"
+                    title="Попросить модель составить промпт заново по теме агента">Составить заново</button>
+          </div>
+          <p class="note">Промпт составляет модель по теме агента; его можно
+            поправить руками. Пустой промпт — общий из config.yaml.</p>
         </section>
 
         <section class="tab-page" data-page="books" hidden>
@@ -185,6 +204,6 @@
     </div>
   </div>
 
-  <script src="/app.js?v=28"></script>
+  <script src="/app.js?v=29"></script>
 </body>
 </html>

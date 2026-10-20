@@ -101,6 +101,46 @@ class RegistryTests(unittest.TestCase):
                          8 + (agent.path / "agent.json").stat().st_size)
 
 
+class PromptTests(unittest.TestCase):
+    """Промпт агента живёт в его папке и переживает перезапуск."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.agents = Agents(self.temp.name)
+        self.agent = self.agents.create("Схемы", "даташиты разъёмов")
+
+    def test_new_agent_has_no_prompt_of_its_own(self):
+        self.assertEqual(self.agent.system_prompt, "")
+        self.assertEqual(self.agent.as_dict()["prompt"], "")
+
+    def test_saved_prompt_is_written_to_agent_json_and_read_back(self):
+        self.agents.save_prompt(self.agent.slug, "  Ты — ассистент по схемам.  ")
+
+        again = Agents(self.temp.name).get(self.agent.slug)
+        self.assertEqual(again.system_prompt, "Ты — ассистент по схемам.")
+        self.assertEqual(again.as_dict()["prompt"], "Ты — ассистент по схемам.")
+        self.assertEqual(again.description, "даташиты разъёмов")
+
+    def test_prompt_can_be_cleared_to_go_back_to_the_common_one(self):
+        self.agents.save_prompt(self.agent.slug, "Свой промпт")
+        self.agents.save_prompt(self.agent.slug, "   ")
+
+        self.assertEqual(self.agents.get(self.agent.slug).system_prompt, "")
+
+    def test_topic_is_updated_together_with_the_prompt(self):
+        updated = self.agents.save_prompt(self.agent.slug, "Промпт", "пайка и разъёмы")
+
+        self.assertEqual(updated.description, "пайка и разъёмы")
+        self.assertEqual(self.agents.get(self.agent.slug).description, "пайка и разъёмы")
+
+    def test_agent_json_without_prompt_falls_back_to_the_common_one(self):
+        (self.agent.path / "agent.json").write_text(
+            '{"title": "Схемы", "description": "даташиты"}', encoding="utf-8")
+
+        self.assertEqual(self.agents.get(self.agent.slug).system_prompt, "")
+
+
 class BookTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()

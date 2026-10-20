@@ -4,8 +4,8 @@
 
 Агент — это папка с латинским именем:
 
-    agents/cooking/
-        agent.json     — название и описание для интерфейса
+    agents/dokumenty/
+        agent.json     — название, описание и системный промпт агента
         books/         — книги агента (PDF, EPUB, TXT, FB2)
         db/            — векторная база (ChromaDB) этого агента
 
@@ -58,6 +58,9 @@ class Agent:
     path: Path
     description: str = ""
     created: str = ""
+    # Свой системный промпт агента: у раздела знаний своя тема, общий
+    # промпт подошёл бы только одному агенту из всех.
+    system_prompt: str = ""
 
     @property
     def books_dir(self) -> Path:
@@ -72,6 +75,7 @@ class Agent:
             "slug": self.slug,
             "title": self.title,
             "description": self.description,
+            "prompt": self.system_prompt,
             "created": self.created,
             "folder": self.path.name,
         }
@@ -149,6 +153,16 @@ class Agents:
         if not title:
             raise AgentError("Название не может быть пустым")
         agent.title = title
+        self._save(agent)
+        return agent
+
+    def save_prompt(self, slug: str, system_prompt: str,
+                    description: str | None = None) -> Agent:
+        """Записывает системный промпт агента (пустой — вернуться к общему)."""
+        agent = self.get(slug)
+        agent.system_prompt = (system_prompt or "").strip()
+        if description is not None:
+            agent.description = (description or "").strip()
         self._save(agent)
         return agent
 
@@ -281,6 +295,7 @@ class Agents:
             path=path,
             description=str(data.get("description") or ""),
             created=str(data.get("created") or ""),
+            system_prompt=str(data.get("prompt") or ""),
         )
 
     @staticmethod
@@ -288,7 +303,8 @@ class Agents:
         agent.path.mkdir(parents=True, exist_ok=True)
         (agent.path / AGENT_FILE).write_text(
             json.dumps({"title": agent.title, "description": agent.description,
-                        "created": agent.created}, ensure_ascii=False, indent=2),
+                        "prompt": agent.system_prompt, "created": agent.created},
+                       ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
         agent.books_dir.mkdir(exist_ok=True)

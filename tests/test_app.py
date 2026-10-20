@@ -21,6 +21,18 @@ OCR_MISSING = {"available": False, "path": "", "version": "", "languages": [],
                "has_russian": False, "install_url": "https://example.org/tesseract"}
 
 
+class _FakeChatClient:
+    """Модель с готовым ответом на запрос вне потока (промпт агента)."""
+
+    def __init__(self, answer):
+        self.answer = answer
+        self.messages = []
+
+    async def chat(self, messages, max_tokens=None):
+        self.messages.append(messages)
+        return self.answer
+
+
 class ApiTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -93,7 +105,8 @@ class ApiTests(unittest.TestCase):
         self.assertIn("Б", data["agents"][0]["size_text"])
 
     def test_agent_is_created_renamed_and_deleted(self):
-        created = self.client.post("/api/agents", json={"title": "Кулинария"}).json()
+        created = self.client.post("/api/agents",
+                                   json={"title": "Кулинария", "generate_prompt": False}).json()
         self.assertEqual(created["slug"], "kulinariya")
 
         renamed = self.client.patch(f"/api/agents/{created['slug']}",
@@ -103,6 +116,52 @@ class ApiTests(unittest.TestCase):
         answer = self.client.delete(f"/api/agents/{created['slug']}")
         self.assertEqual(answer.status_code, 200)
         self.assertFalse(self.agents.exists("kulinariya"))
+
+    def test_agent_prompt_is_written_by_the_model(self):
+        llm = _FakeChatClient("Ты — ассистент по схемам и даташитам.")
+
+        with patch.object(app_module, "get_client", return_value=llm):
+            created = self.client.post("/api/agents", json={
+                "title": "Схемы", "description": "даташиты разъёмов"}).json()
+
+        self.assertEqual(created["prompt"], "Ты — ассистент по схемам и даташитам.")
+        self.assertNotIn("prompt_error", created)
+        self.assertIn("даташиты разъёмов", llm.messages[0][0]["content"])
+        self.assertEqual(self.agents.get(created["slug"]).system_prompt,
+                         "Ты — ассистент по схемам и даташитам.")
+        self.assertEqual(self.client.get("/api/agents").json()["agents"][0]["prompt"],
+                         "Ты — ассистент по схемам и даташитам.")
+
+    def test_agent_without_model_gets_a_template_prompt(self):
+        with patch.object(app_module, "needs_key", return_value=True), \
+             patch.object(app_module, "key_for", return_value=""):
+            created = self.client.post("/api/agents", json={
+                "title": "Схемы", "description": "даташиты"}).json()
+
+        self.assertIn("даташиты", created["prompt"])   # агент всё равно создан
+        self.assertIn("ключ", created["prompt_error"])
+        self.assertEqual(self.agents.get(created["slug"]).system_prompt, created["prompt"])
+
+    def test_agent_prompt_is_composed_again_and_edited(self):
+        agent = self.agents.create("Схемы", "даташиты разъёмов")
+        llm = _FakeChatClient("Промпт от модели.")
+
+        with patch.object(app_module, "get_client", return_value=llm):
+            composed = self.client.post(f"/api/agents/{agent.slug}/prompt",
+                                        json={"description": "пайка и разъёмы"}).json()
+
+        self.assertEqual(composed["prompt"], "Промпт от модели.")
+        self.assertEqual(composed["description"], "пайка и разъёмы")   # тема обновилась
+        self.assertIn("пайка и разъёмы", llm.messages[0][0]["content"])
+
+        saved = self.client.put(f"/api/agents/{agent.slug}/prompt",
+                                json={"prompt": "  Мой промпт.  "}).json()
+        self.assertEqual(saved["prompt"], "Мой промпт.")
+        self.assertEqual(self.agents.get(agent.slug).system_prompt, "Мой промпт.")
+
+        cleared = self.client.put(f"/api/agents/{agent.slug}/prompt",
+                                  json={"prompt": ""}).json()
+        self.assertEqual(cleared["prompt"], "")
 
     def test_title_without_letters_is_rejected(self):
         response = self.client.post("/api/agents", json={"title": "!!!"})
@@ -370,11 +429,13 @@ class _FakeLLM:
         self.answers = list(answers)   # [(куски текста, finish_reason), ...]
         self.calls = 0
         self.finish_reason = None
+        self.messages = None
 
     async def stream(self, messages):
         pieces, reason = self.answers[self.calls]
         self.calls += 1
         self.finish_reason = reason
+        self.messages = messages
         for piece in pieces:
             yield piece
 
@@ -391,10 +452,10 @@ class ChatContinuationTests(unittest.IsolatedAsyncioTestCase):
         store.sources.return_value = [{"source": "книга.pdf"}]
         return store
 
-    async def ask(self, answers):
+    async def ask(self, answers, system_prompt=None):
         request = app_module.ChatRequest(message="котлета по киевски", history=[])
         llm = _FakeLLM(answers)
-        agent = Mock(title="Кулинария", slug="kulinariya")
+        agent = Mock(title="Кулинария", slug="kulinariya", system_prompt=system_prompt)
         merge_before = app_module.CONFIG.search.merge_mode
         app_module.CONFIG.search.merge_mode = "off"
         self.addCleanup(setattr, app_module.CONFIG.search, "merge_mode", merge_before)
@@ -429,6 +490,19 @@ class ChatContinuationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.answer(events), "Целый ответ.")
         self.assertEqual(llm.calls, 1)
         self.assertNotIn("event: stage", "".join(events))
+
+    async def test_agent_prompt_replaces_the_common_one(self):
+        llm, _ = await self.ask([(["Ответ."], "stop")],
+                                system_prompt="Ты — ассистент по схемам и даташитам.")
+
+        self.assertEqual(llm.messages[0],
+                         {"role": "system",
+                          "content": "Ты — ассистент по схемам и даташитам."})
+
+    async def test_agent_without_prompt_uses_the_common_one(self):
+        llm, _ = await self.ask([(["Ответ."], "stop")], system_prompt="   ")
+
+        self.assertEqual(llm.messages[0]["content"], app_module.CONFIG.prompt.system)
 
 
 if __name__ == '__main__':

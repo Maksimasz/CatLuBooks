@@ -504,6 +504,22 @@ body {
 }
 .row-new input:focus { border-color: #333; outline: none; }
 
+/* Промпт агента: многострочное поле в настройках. */
+.prompt-box {
+  display: block;
+  width: 100%;
+  min-height: 120px;
+  resize: vertical;
+  background: var(--field);
+  color: var(--text);
+  border: 1px solid transparent;
+  border-radius: 9px;
+  padding: 10px 12px;
+  font: 13px/1.45 inherit;
+}
+.prompt-box:focus { border-color: #333; outline: none; }
+.prompt-box:disabled { opacity: 0.55; }
+
 button.primary, button.danger, button.ghost, .upload {
   border: 1px solid transparent;
   border-radius: 9px;

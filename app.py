@@ -25,7 +25,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from config import Config, load_config, resolve_llm, save_setting
-from core import ocr, parsers
+from core import ocr, parsers, promptgen
 from core.agents import Agent, AgentError, AgentNotFound, Agents
 from core.database import UNKNOWN_SOURCE
 from core.history import add as history_add, clear as history_clear
@@ -183,6 +183,16 @@ class KeyRequest(BaseModel):
 class AgentRequest(BaseModel):
     title: str
     description: str = ""
+    provider: str | None = None
+    model: str | None = None
+    generate_prompt: bool = True
+
+
+class PromptRequest(BaseModel):
+    prompt: str = ""
+    description: str | None = None
+    provider: str | None = None
+    model: str | None = None
 
 
 class OcrRequest(BaseModel):
@@ -222,15 +232,24 @@ def search_query(req: ChatRequest) -> str:
     return f"{previous} {question}".strip() if previous else question
 
 
+def agent_system(agent) -> str:
+    """Системный промпт агента; если своего нет — общий из config.yaml."""
+    own = getattr(agent, "system_prompt", "") or ""
+    if isinstance(own, str) and own.strip():
+        return own.strip()
+    return CONFIG.prompt.system
+
+
 def build_messages(req: ChatRequest, context: str,
-                   template: str | None = None) -> list[dict]:
+                   template: str | None = None,
+                   system: str | None = None) -> list[dict]:
     """Собирает сообщения для модели: system + история + текущий вопрос."""
     prompt = CONFIG.prompt
     if template is None:
         template = prompt.answer_template if context else prompt.no_context_template
     user_content = template.format(context=context, question=req.message)
 
-    messages = [{"role": "system", "content": prompt.system}]
+    messages = [{"role": "system", "content": system or prompt.system}]
     history, size = [], 0
     for msg in reversed(req.history[-CONFIG.search.history_messages:]):
         if msg.role not in ("user", "assistant"):
@@ -264,6 +283,7 @@ async def stream_chat(req: ChatRequest, app: FastAPI):
 
     merge_mode = CONFIG.search.merge_mode
     merging = merge_mode in ("fast", "full")
+    system = agent_system(agent)   # у каждого агента свой промпт
 
     try:
         # При сведении контекст большой, и первый токен приходит позже:
@@ -332,7 +352,8 @@ async def stream_chat(req: ChatRequest, app: FastAPI):
             # длины: черновику хватает компактного рецепта, а на CPU длинная
             # генерация идёт слишком долго.
             draft = await llm.chat(
-                build_messages(req, context, CONFIG.prompt.synthesis_template),
+                build_messages(req, context, CONFIG.prompt.synthesis_template,
+                               system),
                 max_tokens=CONFIG.llm.merge_max_tokens)
         except LLMError as exc:
             print(f"⚠️ Модель: {exc}")
@@ -349,18 +370,18 @@ async def stream_chat(req: ChatRequest, app: FastAPI):
                     else CONFIG.prompt.merge_template)
 
     answer: list[str] = []
-    messages = build_messages(req, context, template)
+    messages = build_messages(req, context, template, system)
     try:
         async for piece in llm.stream(messages):
             answer.append(piece)
             yield sse("token", {"text": piece})
-        # Модель упёрлась в лимит токенов — просим продолжение: полный рецепт
+        # Модель упёрлась в лимит токенов — просим продолжение: полный ответ
         # по-русски длиннее одного ответа, а обрыв на полуслове бесполезен.
         for _ in range(CONFIG.llm.max_continuations):
             if llm.finish_reason != "length":
                 break
             yield sse("stage", {"text": "Ответ длинный — дописываю продолжение…"})
-            messages = build_messages(req, context, template) + [
+            messages = build_messages(req, context, template, system) + [
                 {"role": "assistant", "content": "".join(answer)},
                 {"role": "user", "content": CONTINUE_PROMPT},
             ]
@@ -521,9 +542,64 @@ async def list_agents():
 
 
 @app.post("/api/agents")
-async def create_agent(req: AgentRequest):
+async def create_agent(req: AgentRequest, request: Request):
+    """Создаёт агента и сразу составляет ему промпт под указанную тему."""
     agent = await asyncio.to_thread(AGENTS.create, req.title, req.description)
+    info = agent.as_dict()
+    if not req.generate_prompt:
+        return info
+    prompt, error = await compose_prompt_for(request.app, agent.title,
+                                             agent.description,
+                                             req.provider, req.model)
+    agent = await asyncio.to_thread(AGENTS.save_prompt, agent.slug, prompt)
+    info = agent.as_dict()
+    if error:
+        info["prompt_error"] = error
+    return info
+
+
+async def compose_prompt_for(app: FastAPI, title: str, description: str,
+                             provider: str | None,
+                             model: str | None) -> tuple[str, str]:
+    """Промпт агента от модели. Возвращает промпт и причину замены шаблоном.
+
+    Недоступная модель — не повод не создать агента: тогда промпт берётся из
+    шаблона, а в интерфейсе видно, почему, и его можно поправить руками.
+    """
+    provider = provider or CONFIG.llm.provider
+    model = model or CONFIG.llm.model
+    fallback = promptgen.fallback_prompt(CONFIG.prompt, title, description)
+    if needs_key(provider) and not key_for(provider):
+        return fallback, (f"Промпт составлен по шаблону: для «{provider}» нужен "
+                          f"API-ключ (⚙ → Модели).")
+    try:
+        llm = get_client(app, provider, model, CONFIG.llm.prompt_timeout)
+        written = await promptgen.compose(CONFIG.prompt, llm, title, description)
+    except Exception as exc:   # сеть, ключ, формат ответа — агент важнее
+        return fallback, f"Промпт составлен по шаблону: модель не ответила ({exc})"
+    return written or fallback, ""
+
+
+@app.put("/api/agents/{slug}/prompt")
+async def save_agent_prompt(slug: str, req: PromptRequest):
+    """Сохраняет промпт, отредактированный в интерфейсе."""
+    agent = await asyncio.to_thread(AGENTS.save_prompt, slug, req.prompt,
+                                    req.description)
     return agent.as_dict()
+
+
+@app.post("/api/agents/{slug}/prompt")
+async def compose_agent_prompt(slug: str, req: PromptRequest, request: Request):
+    """Составляет промпт агента заново: по новой теме или текущей."""
+    agent = await asyncio.to_thread(AGENTS.get, slug)
+    description = agent.description if req.description is None else req.description
+    prompt, error = await compose_prompt_for(request.app, agent.title, description,
+                                             req.provider, req.model)
+    agent = await asyncio.to_thread(AGENTS.save_prompt, slug, prompt, description)
+    info = agent.as_dict()
+    if error:
+        info["prompt_error"] = error
+    return info
 
 
 @app.patch("/api/agents/{slug}")
