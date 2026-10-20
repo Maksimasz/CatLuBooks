@@ -143,6 +143,18 @@ class EmbeddingsConfig:
 
 
 @dataclass
+class LlamaCppConfig:
+    # llama-server: пусто — ищем рядом с проектом (llama.cpp/) и в PATH.
+    binary: str = ""
+    # Откуда берутся GGUF-модели (папка не в git).
+    models_dir: str = "./models"
+    # Порт управляемого сервера: на него смотрит встроенный провайдер llamacpp.
+    port: int = 8080
+    # Дополнительные ключи llama-server: контекст, слои на GPU и т.п.
+    args: List[str] = field(default_factory=lambda: ["-c", "8192"])
+
+
+@dataclass
 class LLMConfig:
     provider: str = "ollama"
     model: str = "yandex/YandexGPT-5-Lite-8B-instruct-GGUF:latest"
@@ -195,6 +207,7 @@ class Config:
     store: StoreConfig = field(default_factory=StoreConfig)
     embeddings: EmbeddingsConfig = field(default_factory=EmbeddingsConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
+    llamacpp: LlamaCppConfig = field(default_factory=LlamaCppConfig)
     search: SearchConfig = field(default_factory=SearchConfig)
     server: ServerConfig = field(default_factory=ServerConfig)
 
@@ -314,6 +327,7 @@ def load_config(path: str | None = None) -> Config:
         store=_from_dict(StoreConfig, raw.get("store")),
         embeddings=_from_dict(EmbeddingsConfig, raw.get("embeddings")),
         llm=_from_dict(LLMConfig, raw.get("llm")),
+        llamacpp=_from_dict(LlamaCppConfig, raw.get("llamacpp")),
         search=_from_dict(SearchConfig, raw.get("search")),
         server=_from_dict(ServerConfig, raw.get("server")),
     )

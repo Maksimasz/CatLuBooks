@@ -137,6 +137,10 @@ class OpenAICompatClient:
         text = f"Модель ответила ошибкой {status}: {message[:400]}"
         if retry_after:
             text += f"\nЛимит провайдера — повторите через {retry_after} с."
+        if "exceeds the available context" in message or "context size" in message:
+            # Маленькая локальная модель не влезает в найденный контекст.
+            text += ("\nКонтекст не помещается в модель: уменьшите "
+                     "search.max_context_chars или увеличьте -c в llamacpp.args.")
         return text
 
     @staticmethod

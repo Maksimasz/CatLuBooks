@@ -36,7 +36,7 @@ PROVIDERS: Dict[str, Dict[str, Any]] = {
     },
     "llamacpp": {
         "label": "llama.cpp (локально, без ключа)",
-        "base_url": "http://localhost:8080/v1",
+        "base_url": "http://127.0.0.1:8080/v1",
         "env": None,
         # Имя модели задаёт сам llama-server (--alias или путь к GGUF), поэтому
         # запасного списка нет: живой список с сервера важнее.
@@ -157,6 +157,12 @@ def base_url_for(provider: str) -> str:
         f"Неизвестный провайдер «{provider}». Укажите известное имя из реестра "
         f"или полный URL OpenAI-совместимого сервера в поле base_url."
     )
+
+
+def set_provider_base_url(provider: str, url: str) -> None:
+    """Меняет адрес провайдера на лету (порт управляемого llama-server)."""
+    if provider in PROVIDERS and url:
+        PROVIDERS[provider]["base_url"] = url
 
 
 def needs_key(provider: str) -> bool:

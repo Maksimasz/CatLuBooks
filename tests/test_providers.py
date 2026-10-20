@@ -5,7 +5,14 @@ from unittest.mock import patch
 
 from config import LLMConfig, resolve_llm
 from core.llm import _is_chat_model, _is_free_pricing
-from core.providers import base_url_for, key_for, model_is_free, needs_key, provider_catalog
+from core.providers import (
+    base_url_for,
+    key_for,
+    model_is_free,
+    needs_key,
+    provider_catalog,
+    set_provider_base_url,
+)
 
 
 class ProviderTests(unittest.TestCase):
@@ -18,7 +25,7 @@ class ProviderTests(unittest.TestCase):
         # llama-server из llama.cpp: тот же OpenAI-совместимый API, порт 8080.
         self.assertFalse(needs_key("llamacpp"))
         self.assertEqual(key_for("llamacpp"), "local")
-        self.assertEqual(base_url_for("llamacpp"), "http://localhost:8080/v1")
+        self.assertEqual(base_url_for("llamacpp"), "http://127.0.0.1:8080/v1")
         self.assertTrue(model_is_free("llamacpp", "qwen2.5-3b"))
 
     def test_catalog_lists_llamacpp_as_configured(self):
@@ -40,6 +47,16 @@ class ProviderTests(unittest.TestCase):
     def test_unknown_provider_without_url_fails(self):
         with self.assertRaises(ValueError):
             base_url_for("нет-такого-провайдера")
+
+    def test_provider_url_can_be_changed_at_runtime(self):
+        # Порт управляемого llama-server задаётся в config.yaml, и провайдер
+        # должен смотреть ровно туда же.
+        old = base_url_for("llamacpp")
+        try:
+            set_provider_base_url("llamacpp", "http://127.0.0.1:9090/v1")
+            self.assertEqual(base_url_for("llamacpp"), "http://127.0.0.1:9090/v1")
+        finally:
+            set_provider_base_url("llamacpp", old)
 
     def test_key_is_taken_from_environment(self):
         with patch.dict(os.environ, {"GROQ_API_KEY": "test-key"}):

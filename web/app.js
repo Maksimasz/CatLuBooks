@@ -166,6 +166,7 @@ function selectTab(name) {
   if (name === "agents") refreshAgents();
   if (name === "books") { refreshBooks(); loadOcr(); loadMerge(); }
   if (name === "base") refreshAgents();
+  if (name === "models") refreshLlamaCpp();
   if (name === "server") refreshServer();
   if (name === "history") refreshHistory();
 }
@@ -1480,9 +1481,145 @@ modelsRefreshEl.addEventListener("click", async () => {
   modelsRefreshEl.textContent = "Обновляю…";
   try {
     await refreshModels(true);       // без кэша: сервер могли только запустить
+    await refreshLlamaCpp();         // и файлы .gguf в папке models
   } finally {
     modelsRefreshEl.textContent = label;
     modelsRefreshEl.disabled = false;
+  }
+});
+
+/* ---- llama.cpp: запуск локальной модели из интерфейса -------------------
+   Приложение само поднимает llama-server с выбранным .gguf. Ждать загрузки
+   не нужно: состояние обновляется опросом, кнопка «Запустить» гаснет сама.
+   ---------------------------------------------------------------------- */
+const llamacppStatusEl = document.getElementById("llamacpp-status");
+const llamacppModelEl = document.getElementById("llamacpp-model");
+const llamacppModelsEl = document.getElementById("llamacpp-models");
+const llamacppStartEl = document.getElementById("llamacpp-start");
+const llamacppStopEl = document.getElementById("llamacpp-stop");
+const llamacppLogEl = document.getElementById("llamacpp-log");
+const llamacppHintEl = document.getElementById("llamacpp-hint");
+
+const LLAMACPP_STATES = {
+  off: "не запущен",
+  starting: "загружает модель…",
+  running: "работает",
+  external: "работает (запущен отдельно)",
+};
+let llamacppTimer = null;
+let llamacppState = "";
+
+function stopLlamaCppPolling() {
+  if (llamacppTimer) clearTimeout(llamacppTimer);
+  llamacppTimer = null;
+}
+
+function renderLlamaCpp(status) {
+  const state = status.state || "off";
+  const parts = [LLAMACPP_STATES[state] || state];
+  if (status.model && state !== "off") parts.push(status.model);
+  if ((state === "running" || state === "external") && status.url) parts.push(status.url);
+  if (status.error) parts.push(status.error);
+  llamacppStatusEl.textContent = parts.join(" · ");
+
+  llamacppModelsEl.innerHTML = "";
+  (status.models || []).forEach((model) => {
+    const option = el("option", null, `${model.name} — ${model.size_text}`);
+    option.value = model.name;
+    llamacppModelsEl.appendChild(option);
+  });
+  const models = status.models || [];
+  if (!llamacppModelEl.value && models.length === 1) llamacppModelEl.value = models[0].name;
+
+  llamacppLogEl.textContent = status.log || "(журнала пока нет)";
+  llamacppStartEl.disabled = !status.can_start || !models.length;
+  llamacppStopEl.disabled = !status.can_stop;
+
+  const link = ' <a href="https://github.com/ggml-org/llama.cpp/releases" '
+    + 'target="_blank" rel="noopener">Скачать llama.cpp</a>.';
+  llamacppHintEl.innerHTML = status.found
+    ? `Модели берутся из <code>${escapeHtml(status.models_dir)}</code>, сервер: `
+      + `<code>${escapeHtml(status.binary)}</code>.`
+    : "llama-server не найден: положите llama-server.exe в папку "
+      + "<code>llama.cpp</code> рядом с проектом или укажите путь в config.yaml "
+      + `(llamacpp.binary).${link}`;
+}
+
+/** Состояние llama-server; пока модель грузится — опрашиваем каждые 2 с. */
+async function refreshLlamaCpp() {
+  stopLlamaCppPolling();
+  let status;
+  try {
+    status = await api("/api/llamacpp");
+  } catch (error) {
+    llamacppStatusEl.textContent = `не удалось узнать состояние: ${error.message}`;
+    return;
+  }
+  const before = llamacppState;
+  llamacppState = status.state || "off";
+  renderLlamaCpp(status);
+  if (llamacppState === "starting") {
+    llamacppTimer = setTimeout(refreshLlamaCpp, 2000);
+  } else if (llamacppState === "running" && before !== "running") {
+    await refreshModels(true);       // модель появилась в списке провайдера
+  }
+}
+
+/** После запуска сразу выбирает llama.cpp и эту модель — можно спрашивать. */
+function connectLlamaCpp(status) {
+  const alias = status.alias || String(status.model || "").replace(/\.gguf$/i, "");
+  if (!alias) return;
+  providerEl.value = "llamacpp";
+  localStorage.setItem("catlu.provider", "llamacpp");
+  modelEl.value = alias;
+  saveModel("llamacpp", alias);
+  updateModelLabel();
+}
+
+llamacppStartEl.addEventListener("click", async () => {
+  const model = llamacppModelEl.value.trim();
+  if (!model) {
+    showNote("Выберите модель .gguf из папки models", "error");
+    return;
+  }
+  llamacppStartEl.disabled = true;
+  const label = llamacppStartEl.textContent;
+  llamacppStartEl.textContent = "Запускаю…";
+  try {
+    const status = await api("/api/llamacpp/start", {
+      method: "POST", headers: JSON_HEADER, body: JSON.stringify({ model }),
+    });
+    renderLlamaCpp(status);
+    if (status.state === "starting" || status.state === "running") {
+      connectLlamaCpp(status);
+      showNote(`llama-server запускается · ${status.model}`);
+      llamacppTimer = setTimeout(refreshLlamaCpp, 2000);
+    } else if (status.error) {
+      showNote(status.error, "error");
+    }
+  } catch (error) {
+    showNote(error.message, "error");
+  } finally {
+    llamacppStartEl.textContent = label;
+    if (!llamacppTimer) refreshLlamaCpp();
+  }
+});
+
+llamacppStopEl.addEventListener("click", async () => {
+  llamacppStopEl.disabled = true;
+  const label = llamacppStopEl.textContent;
+  llamacppStopEl.textContent = "Останавливаю…";
+  try {
+    const status = await api("/api/llamacpp/stop", { method: "POST" });
+    renderLlamaCpp(status);
+    showNote("llama-server остановлен");
+    await new Promise((resolve) => setTimeout(resolve, 800));  // сервер успевает уйти
+    await refreshModels(true);
+  } catch (error) {
+    showNote(error.message, "error");
+  } finally {
+    llamacppStopEl.textContent = label;
+    refreshLlamaCpp();
   }
 });
 

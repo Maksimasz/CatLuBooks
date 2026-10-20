@@ -102,6 +102,17 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("502", text)
         self.assertIn("Bad gateway", text)
 
+    def test_too_long_context_is_explained_with_a_way_out(self):
+        """Маленькая локальная модель: подсказываем, что уменьшить или расширить."""
+        body = json.dumps({"error": {
+            "message": "request (30053 tokens) exceeds the available context size "
+                       "(2048 tokens), try increasing it"}})
+
+        text = OpenAICompatClient._error_text(400, body)
+
+        self.assertIn("exceeds the available context size", text)
+        self.assertIn("search.max_context_chars", text)
+
     async def test_chat_error_reaches_the_user(self):
         """Ошибка провайдера — это LLMError с понятным текстом, а не сбой."""
         response = Mock()

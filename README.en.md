@@ -124,11 +124,13 @@ CatLuBooks/
 │   ├── llm.py          # generative model client
 │   ├── providers.py    # provider registry and API keys
 │   ├── models.py       # model list for the interface
+│   ├── llamacpp.py     # managed llama-server: start and stop
 │   ├── server.py       # network addresses, server restart and stop
 │   └── store.py        # per-agent stores for the web layer
 ├── web/                # chat interface, settings, PWA
 ├── tools/drop.py       # removing data from the console
 ├── agents/             # agents: books and databases (not in git)
+├── models/             # GGUF models for llama.cpp (not in git)
 ├── settings.json       # choices made in the interface, e.g. OCR (not in git)
 ├── secrets.json        # cloud provider keys (not in git)
 ├── tests/              # self-contained tests (no Ollama, no models)
@@ -427,6 +429,7 @@ python app.py
 | `store` | the agents folder, book formats, chunk sizes, OCR |
 | `embeddings` | the local embedding model |
 | `llm` | provider, model, generation parameters and timeouts |
+| `llamacpp` | your own llama-server: path to it, GGUF folder, port, start flags |
 | `search` | how many chunks to retrieve, context limit, history, search mode, source merging |
 | `server` | address and port |
 
@@ -444,7 +447,7 @@ built in (choose them in ⚙ → Модели, enter the key there as well):
 | Provider | Key | Note |
 |---|---|---|
 | `ollama` | not needed | local, the default; models — [ollama.com/search](https://ollama.com/search) |
-| `llamacpp` | not needed | [llama.cpp](https://github.com/ggml-org/llama.cpp) (`llama-server`) on `localhost:8080` |
+| `llamacpp` | not needed | [llama.cpp](https://github.com/ggml-org/llama.cpp) (`llama-server`) on `127.0.0.1:8080`, the app starts it for you |
 | `groq` | `GROQ_API_KEY` | free, very fast |
 | `gemini` | `GEMINI_API_KEY` | Google's free tier |
 | `openrouter` | `OPENROUTER_API_KEY` | free models available |
@@ -482,8 +485,50 @@ endpoint into `llm.provider` (`http://192.168.1.5:1234/v1`).
 
 `llama-server` from [llama.cpp](https://github.com/ggml-org/llama.cpp) exposes
 the same OpenAI-compatible API, so it has its own entry in the provider list:
-`llama.cpp (локально, без ключа)`, pointing at `http://localhost:8080/v1`. No key
+`llama.cpp (локально, без ключа)`, pointing at `http://127.0.0.1:8080/v1`. No key
 is needed, just like with Ollama.
+
+#### Your own model, straight from the interface (no console)
+
+⚙ → Models has a `llama.cpp` block:
+
+1. Put a `.gguf` file into the `models/` folder next to the project (subfolders
+   work too — they show up as `subfolder/model.gguf`).
+2. Pick the model and press "Запустить".
+3. The server comes up on `127.0.0.1:8080`, the `llama.cpp` provider becomes
+   active and the chosen model becomes the current one. You can ask right away.
+4. "Остановить" shuts the server down. The log ("Лог llama-server") shows why a
+   model failed to load.
+
+Where to get `llama-server`:
+
+- drop `llama-server.exe` into a `llama.cpp/` folder next to the project — the
+  app finds it on its own;
+- or set the path in `config.yaml` → `llamacpp.binary`;
+- or leave `llama-server.exe` in PATH (a winget install puts it there).
+
+Settings in `config.yaml` → `llamacpp`:
+
+```yaml
+llamacpp:
+  binary: ""        # empty — we look next to the project and in PATH
+  models_dir: "./models"
+  port: 8080        # port of the managed server; the provider points there too
+  args:             # extra llama-server flags
+    - "-c"
+    - "8192"
+```
+
+- `args` is the place for `-ngl 99` (layers on the GPU) and the like. The
+  context of `8192` is chosen with room to spare: merging sources sends about
+  16,000 characters to the model.
+- The server is not tied to the app: restarting the app leaves it running, and
+  its state survives the restart.
+- If port 8080 is taken by another program, the app says so. Free the port, or
+  set another one in `llamacpp.port` and restart the app — the provider gets
+  the same address.
+
+Starting it by hand still works:
 
 ```bash
 llama-server.exe -m qwen2.5-3b-instruct-q4_k_m.gguf --port 8080 --alias qwen2.5-3b
@@ -493,14 +538,14 @@ llama-server.exe -m qwen2.5-3b-instruct-q4_k_m.gguf --port 8080 --alias qwen2.5-
   it the list shows the file path, and you can still type that into the model
   field manually.
 - `llama-server` listens on port 8080 by default. If it is taken, start on
-  another port and give the provider as a full URL: `http://localhost:8081/v1`.
+  another port and give the provider as a full URL: `http://127.0.0.1:8081/v1`.
 - GGUF models live on [Hugging Face](https://huggingface.co/models?library=gguf).
   For a weak CPU, `Q4_K_M` quantisations of 3B–8B models are a good fit: 2–5 GB
   and no GPU required.
 - If the server is not running, the interface says so: "Сервер не отвечает —
   проверьте, запущен ли он". You can still type the model name by hand.
 - LM Studio is a graphical wrapper around llama.cpp: enable its local server
-  (port 1234) and set the provider to the full URL `http://localhost:1234/v1`.
+  (port 1234) and set the provider to the full URL `http://127.0.0.1:1234/v1`.
 
 ### Choosing a model for weak hardware
 

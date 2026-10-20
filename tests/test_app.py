@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 
 import app as app_module
 from core.agents import Agents
+from core.llamacpp import LlamaCppError
 from core.store import StoreRegistry
 
 # Как отвечает проверка tesseract: установлен со всеми языками или нет.
@@ -511,6 +512,49 @@ class ChatContinuationTests(unittest.IsolatedAsyncioTestCase):
         llm, _ = await self.ask([(["Ответ."], "stop")], system_prompt="   ")
 
         self.assertEqual(llm.messages[0]["content"], app_module.CONFIG.prompt.system)
+
+
+class LlamaCppApiTests(unittest.TestCase):
+    """Запуск llama-server из интерфейса: кнопки и понятные ошибки."""
+
+    def setUp(self):
+        self.client = TestClient(app_module.app)
+        self.llama = Mock()
+        self.llama.status.return_value = {"state": "off", "models": []}
+        self.llama.start.return_value = {"state": "starting", "alias": "qwen",
+                                         "model": "qwen.gguf"}
+        self.llama.stop.return_value = {"state": "off", "models": []}
+        patcher = patch.object(app_module, "LLAMACPP", self.llama)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_status_is_returned(self):
+        response = self.client.get("/api/llamacpp")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["state"], "off")
+
+    def test_start_passes_the_chosen_model(self):
+        response = self.client.post("/api/llamacpp/start",
+                                    json={"model": "qwen.gguf"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["state"], "starting")
+        self.llama.start.assert_called_once_with("qwen.gguf")
+
+    def test_start_error_is_explained_in_plain_words(self):
+        self.llama.start.side_effect = LlamaCppError("llama-server не найден")
+
+        response = self.client.post("/api/llamacpp/start", json={"model": "x.gguf"})
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("не найден", response.json()["detail"])
+
+    def test_stop_asks_the_server_to_stop(self):
+        response = self.client.post("/api/llamacpp/stop")
+
+        self.assertEqual(response.status_code, 200)
+        self.llama.stop.assert_called_once()
 
 
 if __name__ == '__main__':

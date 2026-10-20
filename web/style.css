@@ -371,6 +371,31 @@ body {
 .setting-main { flex: 1; min-width: 0; }
 .setting-title { font-size: 14px; color: #fff; }
 .setting-sub { color: var(--muted); font-size: 12px; margin-top: 2px; }
+
+/* Лог llama-server: длинные строки переносятся, блок не растягивает вкладку */
+.llamacpp-log { margin-top: 10px; }
+.llamacpp-log summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 12px;
+  list-style: none;
+}
+.llamacpp-log summary::-webkit-details-marker { display: none; }
+.llamacpp-log summary::before { content: "▸ "; }
+.llamacpp-log[open] summary::before { content: "▾ "; }
+.llamacpp-log pre {
+  max-height: 220px;
+  overflow: auto;
+  background: #141414;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px;
+  margin: 8px 0 0;
+  font-size: 11px;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
 .switch {
   width: 44px;
   height: 26px;

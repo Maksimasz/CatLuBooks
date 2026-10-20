@@ -140,6 +140,10 @@ settings.json
 # Агенты: книги и базы пользователя (в репозиторий не попадают)
 agents/
 
+# GGUF-модели для llama.cpp и сама сборка llama-server
+models/
+llama.cpp/
+
 # IDE settings
 .vscode/
 .idea/

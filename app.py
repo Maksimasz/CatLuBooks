@@ -28,9 +28,11 @@ from config import Config, load_config, resolve_llm, save_setting
 from core import ocr, parsers, promptgen
 from core.agents import Agent, AgentError, AgentNotFound, Agents
 from core.database import UNKNOWN_SOURCE
+from core.format import human_size
 from core.history import add as history_add, clear as history_clear
 from core.history import delete as history_delete, load as history_load
 from core.jobs import Jobs
+from core.llamacpp import LlamaCppError, LlamaServer
 from core.llm import LLMError, OpenAICompatClient
 from core.models import forget_models, provider_models
 from core.server import ServerControl, SUCCESSOR_ENV, wait_until_free
@@ -40,6 +42,7 @@ from core.providers import (
     needs_key,
     provider_catalog,
     save_secret,
+    set_provider_base_url,
 )
 from core.store import StoreRegistry, VectorStore
 
@@ -63,6 +66,15 @@ AGENTS = Agents(CONFIG.store.agents_root)
 REGISTRY = StoreRegistry(CONFIG, AGENTS)
 JOBS = Jobs()
 SERVER = ServerControl(CONFIG.server.host, CONFIG.server.port)
+LLAMACPP = LlamaServer(
+    root=Path(__file__).resolve().parent,
+    binary=CONFIG.llamacpp.binary,
+    models_dir=Path(__file__).resolve().parent / CONFIG.llamacpp.models_dir,
+    args=CONFIG.llamacpp.args,
+    port=CONFIG.llamacpp.port,
+)
+# Провайдер llamacpp смотрит на тот же адрес, что и управляемый сервер.
+set_provider_base_url("llamacpp", LLAMACPP.url)
 
 
 def save_last_request(record: dict) -> None:
@@ -81,16 +93,6 @@ def save_last_request(record: dict) -> None:
 def sse(event: str, data) -> str:
     """Формирует одно SSE-событие."""
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
-
-
-def human_size(size: int) -> str:
-    """«1536» -> «1,5 КБ»: размеры в интерфейсе читаются глазом."""
-    value = float(size)
-    for unit in ("Б", "КБ", "МБ", "ГБ"):
-        if value < 1024 or unit == "ГБ":
-            return f"{value:.0f} {unit}" if unit == "Б" else f"{value:.1f} {unit}"
-        value /= 1024
-    return f"{value:.1f} ГБ"
 
 
 def mark_scans(agent: Agent, books: list[Dict[str, Any]]) -> None:
@@ -156,6 +158,12 @@ async def agent_error_handler(request: Request, exc: AgentError) -> JSONResponse
     return JSONResponse(status_code=status, content={"detail": str(exc)})
 
 
+@app.exception_handler(LlamaCppError)
+async def llamacpp_error_handler(request: Request, exc: LlamaCppError) -> JSONResponse:
+    """Ошибки llama-server («не найден», «порт занят») — текстом в интерфейс."""
+    return JSONResponse(status_code=400, content={"detail": str(exc)})
+
+
 class ChatMessage(BaseModel):
     role: str
     content: str
@@ -201,6 +209,10 @@ class OcrRequest(BaseModel):
 
 class MergeRequest(BaseModel):
     mode: str = "off"
+
+
+class LlamaStartRequest(BaseModel):
+    model: str = ""
 
 
 def get_client(app: FastAPI, provider: str, model: str,
@@ -520,6 +532,30 @@ async def models(provider: str | None = None, all: int = 0, fresh: int = 0):
         return {"provider": name, "label": name, "models": [], "source": "fallback",
                 "configured": True, "error": "нет реестра моделей"}
     return await provider_models(name, CONFIG, bool(fresh))
+
+
+# --- llama.cpp: своя модель, запуск из интерфейса ---------------------------
+
+@app.get("/api/llamacpp")
+async def llamacpp_status():
+    """Состояние управляемого llama-server: работает, грузит модель, не найден."""
+    return await asyncio.to_thread(LLAMACPP.status)
+
+
+@app.post("/api/llamacpp/start")
+async def llamacpp_start(req: LlamaStartRequest):
+    """Поднимает llama-server с выбранной GGUF-моделью из папки models."""
+    status = await asyncio.to_thread(LLAMACPP.start, req.model)
+    forget_models("llamacpp")   # сервер мог подняться с новой моделью
+    return status
+
+
+@app.post("/api/llamacpp/stop")
+async def llamacpp_stop():
+    """Останавливает llama-server, запущенный приложением."""
+    status = await asyncio.to_thread(LLAMACPP.stop)
+    forget_models("llamacpp")
+    return status
 
 
 # --- Агенты: своя папка, свои книги, своя база ------------------------------
