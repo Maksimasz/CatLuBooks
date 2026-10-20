@@ -31,6 +31,18 @@ PROVIDERS: Dict[str, Dict[str, Any]] = {
             "llama3.2:3b",
         ],
         "needs_key": False,
+        # Локальные модели денег не стоят: в списке они идут как бесплатные.
+        "free_all": True,
+    },
+    "llamacpp": {
+        "label": "llama.cpp (локально, без ключа)",
+        "base_url": "http://localhost:8080/v1",
+        "env": None,
+        # Имя модели задаёт сам llama-server (--alias или путь к GGUF), поэтому
+        # запасного списка нет: живой список с сервера важнее.
+        "models": [],
+        "needs_key": False,
+        "free_all": True,
     },
     "groq": {
         "label": "Groq (бесплатно, очень быстро)",

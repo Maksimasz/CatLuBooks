@@ -9,7 +9,7 @@
   <link rel="manifest" href="/manifest.webmanifest">
   <link rel="icon" href="/icon-192.png">
   <link rel="apple-touch-icon" href="/icon-192.png">
-  <link rel="stylesheet" href="/style.css?v=29">
+  <link rel="stylesheet" href="/style.css?v=30">
 </head>
 <body>
   <header class="topbar">
@@ -168,6 +168,8 @@
           </label>
           <div class="row-new">
             <button id="keybtn" class="ghost" type="button">🔑 Ввести API-ключ</button>
+            <button id="models-refresh" class="ghost" type="button"
+                    title="Запросить списки моделей у провайдеров заново">↻ Обновить список</button>
           </div>
           <p class="note" id="model-status"></p>
           <p class="note">Ключи хранятся только на этом компьютере (файл secrets.json
@@ -204,6 +206,6 @@
     </div>
   </div>
 
-  <script src="/app.js?v=29"></script>
+  <script src="/app.js?v=30"></script>
 </body>
 </html>

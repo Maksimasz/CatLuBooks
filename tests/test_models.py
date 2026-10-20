@@ -72,6 +72,33 @@ class ProviderModelsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["models"], [])
         self.assertEqual(result["source"], "fallback")
 
+    async def test_llamacpp_without_server_says_the_server_is_down(self):
+        with patch.object(models, "fetch_models",
+                          AsyncMock(side_effect=LLMError("All connection attempts failed"))):
+            result = await models.provider_models("llamacpp", Config())
+
+        self.assertEqual(result["source"], "fallback")
+        self.assertEqual(result["models"], [])      # запасного списка нет
+        self.assertIn("не отвечает", result["error"])
+
+    async def test_llamacpp_model_names_come_from_the_server(self):
+        # Имя модели задаёт сам llama-server (--alias).
+        live = [{"id": "qwen2.5-3b", "chat": True}]
+        with patch.object(models, "fetch_models", AsyncMock(return_value=live)):
+            result = await models.provider_models("llamacpp", Config())
+
+        self.assertEqual([m["id"] for m in result["models"]], ["qwen2.5-3b"])
+        self.assertTrue(result["models"][0]["free"])
+
+    async def test_local_server_failure_is_not_cached(self):
+        """llama-server могли только что запустить — кэш не должен мешать."""
+        fetch = AsyncMock(side_effect=LLMError("нет связи"))
+        with patch.object(models, "fetch_models", fetch):
+            await models.provider_models("llamacpp", Config())
+            await models.provider_models("llamacpp", Config())
+
+        self.assertEqual(fetch.await_count, 2)
+
     async def test_parameters_come_from_config(self):
         """Адрес и ключ берутся из конфига запроса, а не из реестра."""
         cfg = Config(llm=LLMConfig(provider="ollama", model="local"))

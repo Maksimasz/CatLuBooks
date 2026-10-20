@@ -444,6 +444,7 @@ built in (choose them in ⚙ → Модели, enter the key there as well):
 | Provider | Key | Note |
 |---|---|---|
 | `ollama` | not needed | local, the default; models — [ollama.com/search](https://ollama.com/search) |
+| `llamacpp` | not needed | [llama.cpp](https://github.com/ggml-org/llama.cpp) (`llama-server`) on `localhost:8080` |
 | `groq` | `GROQ_API_KEY` | free, very fast |
 | `gemini` | `GEMINI_API_KEY` | Google's free tier |
 | `openrouter` | `OPENROUTER_API_KEY` | free models available |
@@ -470,10 +471,36 @@ Free models are detected from the price in the provider's response (OpenRouter),
 the `:free` suffix, a provider flag (all of Groq's API is free) and the model name
 (for example, `flash` at Gemini). Service models — speech synthesis, audio
 transcription, embeddings — are excluded from the list. The list is cached for 5
-minutes and refreshed when a key is entered.
+minutes and refreshed when a key is entered; the "↻ Обновить список" button in
+⚙ → Модели asks for it again — for example right after starting llama-server or
+Ollama.
 
 Any server of your own will work too: put the full URL of an OpenAI-compatible
 endpoint into `llm.provider` (`http://192.168.1.5:1234/v1`).
+
+### llama.cpp and LM Studio
+
+`llama-server` from [llama.cpp](https://github.com/ggml-org/llama.cpp) exposes
+the same OpenAI-compatible API, so it has its own entry in the provider list:
+`llama.cpp (локально, без ключа)`, pointing at `http://localhost:8080/v1`. No key
+is needed, just like with Ollama.
+
+```bash
+llama-server.exe -m qwen2.5-3b-instruct-q4_k_m.gguf --port 8080 --alias qwen2.5-3b
+```
+
+- `--alias` is the model name: that is how it appears in the model list. Without
+  it the list shows the file path, and you can still type that into the model
+  field manually.
+- `llama-server` listens on port 8080 by default. If it is taken, start on
+  another port and give the provider as a full URL: `http://localhost:8081/v1`.
+- GGUF models live on [Hugging Face](https://huggingface.co/models?library=gguf).
+  For a weak CPU, `Q4_K_M` quantisations of 3B–8B models are a good fit: 2–5 GB
+  and no GPU required.
+- If the server is not running, the interface says so: "Сервер не отвечает —
+  проверьте, запущен ли он". You can still type the model name by hand.
+- LM Studio is a graphical wrapper around llama.cpp: enable its local server
+  (port 1234) and set the provider to the full URL `http://localhost:1234/v1`.
 
 ### Choosing a model for weak hardware
 

@@ -5,7 +5,7 @@
 import json
 import tempfile
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from fastapi.testclient import TestClient
 
@@ -141,6 +141,14 @@ class ApiTests(unittest.TestCase):
         self.assertIn("даташиты", created["prompt"])   # агент всё равно создан
         self.assertIn("ключ", created["prompt_error"])
         self.assertEqual(self.agents.get(created["slug"]).system_prompt, created["prompt"])
+
+    def test_models_list_can_skip_the_cache(self):
+        answer = {"provider": "groq", "models": [], "source": "fallback"}
+        with patch.object(app_module, "provider_models",
+                          AsyncMock(return_value=answer)) as fetch:
+            self.client.get("/api/models", params={"provider": "groq", "fresh": 1})
+
+        self.assertTrue(fetch.await_args.args[2])   # fresh=True
 
     def test_agent_prompt_is_composed_again_and_edited(self):
         agent = self.agents.create("Схемы", "даташиты разъёмов")

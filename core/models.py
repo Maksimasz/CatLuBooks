@@ -51,7 +51,9 @@ async def provider_models(name: str, cfg: Config,
         try:
             live = await fetch_models(resolve_llm(cfg.llm, name, None))
         except Exception as exc:  # нет ключа, нет сети и т.п.
-            error = str(exc)
+            # Локальному серверу сеть не нужна: причина почти всегда одна.
+            error = ("Сервер не отвечает — проверьте, запущен ли он."
+                     if not info.get("needs_key", True) else str(exc))
 
     models = []
     for item in (live or info.get("models", [])):
@@ -76,5 +78,8 @@ async def provider_models(name: str, cfg: Config,
         "configured": not info.get("needs_key", True) or bool(key_for(name)),
         "error": error,
     }
-    _cache[name] = (time.monotonic(), result)
+    # Неудачу локального сервера не запоминаем: llama-server могли запустить
+    # минуту назад, и список должен появиться без ожидания кэша.
+    if not error or info.get("needs_key", True):
+        _cache[name] = (time.monotonic(), result)
     return result

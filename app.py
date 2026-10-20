@@ -505,17 +505,21 @@ async def set_key(req: KeyRequest):
 
 
 @app.get("/api/models")
-async def models(provider: str | None = None, all: int = 0):
-    """Список моделей: ?provider=groq для одного, ?all=1 — сразу для всех."""
+async def models(provider: str | None = None, all: int = 0, fresh: int = 0):
+    """Список моделей: ?provider=groq для одного, ?all=1 — сразу для всех.
+
+    ?fresh=1 — не брать кэш: список нужен прямо сейчас (например, только что
+    запустили локальный сервер модели).
+    """
     if all:
         results = await asyncio.gather(
-            *(provider_models(name, CONFIG) for name in PROVIDERS))
+            *(provider_models(name, CONFIG, bool(fresh)) for name in PROVIDERS))
         return {"providers": list(results)}
     name = provider or CONFIG.llm.provider
     if name not in PROVIDERS:
         return {"provider": name, "label": name, "models": [], "source": "fallback",
                 "configured": True, "error": "нет реестра моделей"}
-    return await provider_models(name, CONFIG)
+    return await provider_models(name, CONFIG, bool(fresh))
 
 
 # --- Агенты: своя папка, свои книги, своя база ------------------------------

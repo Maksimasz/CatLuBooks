@@ -38,6 +38,7 @@ const providerEl = document.getElementById("provider");
 const modelEl = document.getElementById("model-input");
 const modelListEl = document.getElementById("model-list");
 const keyBtn = document.getElementById("keybtn");
+const modelsRefreshEl = document.getElementById("models-refresh");
 const modelStatusEl = document.getElementById("model-status");
 const baseStatsEl = document.getElementById("base-stats");
 const historyListEl = document.getElementById("history-list");
@@ -1312,6 +1313,13 @@ function updateModelStatus() {
   const free = models.filter((model) => model.free).length;
   if (info.needs_key && !info.configured) {
     setModelStatus(`Нужен ключ для «${info.label}» — нажмите «Ввести API-ключ», чтобы увидеть модели.`);
+  } else if (!models.length) {
+    const info2 = allModels[currentProvider()] || {};
+    setModelStatus(info2.error
+      ? info2.error
+      : (info2.source === "fallback"
+          ? "Загружаю список моделей…"
+          : "Список моделей пуст — введите название модели вручную."));
   } else if (!currentModel()) {
     setModelStatus("Выберите модель из списка.");
   } else if (free) {
@@ -1416,9 +1424,9 @@ async function loadProviders() {
 }
 
 /** Запрашивает списки моделей у всех провайдеров и перерисовывает поле. */
-async function refreshModels() {
+async function refreshModels(fresh) {
   try {
-    const data = await api("/api/models?all=1");
+    const data = await api(`/api/models?all=1${fresh ? "&fresh=1" : ""}`);
     allModels = {};
     (data.providers || []).forEach((provider) => { allModels[provider.provider] = provider; });
   } catch {
@@ -1463,6 +1471,18 @@ keyBtn.addEventListener("click", async () => {
     await loadProviders();
   } catch (error) {
     showNote(error.message, "error");
+  }
+});
+
+modelsRefreshEl.addEventListener("click", async () => {
+  modelsRefreshEl.disabled = true;
+  const label = modelsRefreshEl.textContent;
+  modelsRefreshEl.textContent = "Обновляю…";
+  try {
+    await refreshModels(true);       // без кэша: сервер могли только запустить
+  } finally {
+    modelsRefreshEl.textContent = label;
+    modelsRefreshEl.disabled = false;
   }
 });
 
