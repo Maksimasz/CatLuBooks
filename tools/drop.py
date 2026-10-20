@@ -5,10 +5,10 @@
 Из папки проекта:
 
     python tools/drop.py --list                    # агенты, книги, фрагменты
-    python tools/drop.py cooking                   # что внутри одного агента
-    python tools/drop.py cooking "Плов.pdf"        # убрать книгу целиком
-    python tools/drop.py cooking --clear           # очистить базу агента
-    python tools/drop.py cooking --delete --yes    # удалить агента целиком
+    python tools/drop.py dokumenty                 # что внутри одного агента
+    python tools/drop.py dokumenty "Руководство.pdf"   # убрать книгу целиком
+    python tools/drop.py dokumenty --clear         # очистить базу агента
+    python tools/drop.py dokumenty --delete --yes  # удалить агента целиком
 
 Обычно это не нужно: агенты, книги и базу можно удалить в интерфейсе
 (⚙ → Агенты, Книги, База). Инструмент выручает, если сервер не запускается.
